@@ -1,3 +1,4 @@
+from typing import Literal
 import uuid
 from datetime import datetime
 
@@ -89,7 +90,7 @@ class AdminUserRead(BaseModel):
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 class DatabaseConfigWrite(BaseModel):
-    engine: str       # mariadb | mysql | postgresql | oracle
+    engine: Literal["postgresql", "mysql", "mariadb"]
     host: str
     port: int
     name: str
