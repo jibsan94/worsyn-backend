@@ -1,0 +1,65 @@
+services:
+  # ── Backend API ──────────────────────────────────────────────────────────────
+  backend:
+    build: .
+    container_name: worsyn-backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://worsyn:worsyn@db:5432/worsyn
+      REDIS_URL: redis://redis:6379/0
+      DEBUG: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - worsyn
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: worsyn-db
+    environment:
+      POSTGRES_USER: worsyn
+      POSTGRES_PASSWORD: worsyn
+      POSTGRES_DB: worsyn
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U worsyn"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - worsyn
+
+  # ── Redis ─────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: worsyn-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - worsyn
+
+volumes:
+  pg_data:
+  redis_data:
+
+networks:
+  worsyn:
+    driver: bridge
