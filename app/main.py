@@ -11,10 +11,15 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: nothing yet (Alembic handles migrations)
+    # Startup: run migrations + seed
+    from app.db.session import engine, Base
+    import app.models.models  # noqa: F401 — ensure all models are imported
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    from app.db.seed import seed_default_owner
+    await seed_default_owner()
     yield
     # Shutdown: close db engine
-    from app.db.session import engine
     await engine.dispose()
 
 
