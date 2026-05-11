@@ -10,7 +10,7 @@ from app.models.models import AdminUser
 
 
 async def seed_default_owner():
-    """Create the default owner user if no admin_users exist."""
+    """Create the default owner user if no system_users exist."""
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(AdminUser).limit(1))
         if result.scalar_one_or_none() is not None:

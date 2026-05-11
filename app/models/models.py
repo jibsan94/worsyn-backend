@@ -70,7 +70,7 @@ class AdminUser(Base):
       - admin: access to Configuración (read-only on DB settings)
       - owner: full system control, can edit all settings
     """
-    __tablename__ = "admin_users"
+    __tablename__ = "system_users"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
