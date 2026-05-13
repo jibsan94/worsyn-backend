@@ -5,6 +5,21 @@ from datetime import datetime
 from pydantic import BaseModel, field_validator
 
 
+# ── Tenant ────────────────────────────────────────────────────────────────────
+
+class TenantRead(BaseModel):
+    model_config = {"from_attributes": True}
+
+    org_id: uuid.UUID
+    status: str
+    db_port: int | None = None
+    container_name: str | None = None
+    compose_dir: str | None = None
+    provisioned_at: datetime | None = None
+    error_msg: str | None = None
+    updated_at: datetime
+
+
 # ── Organization ──────────────────────────────────────────────────────────────
 
 OrgPlan   = Literal["free", "pro", "teams"]
@@ -20,6 +35,8 @@ class OrganizationBase(BaseModel):
     city: str | None = None
     phone: str | None = None
     website: str | None = None
+    email: str | None = None
+    alias: str | None = None
 
 
 class OrganizationCreate(OrganizationBase):
@@ -34,6 +51,8 @@ class OrganizationUpdate(BaseModel):
     city: str | None = None
     phone: str | None = None
     website: str | None = None
+    email: str | None = None
+    alias: str | None = None
 
 
 class OrganizationRead(OrganizationBase):

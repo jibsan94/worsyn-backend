@@ -130,7 +130,8 @@ Cuando `must_change_password: true`:
 | Base de datos | ✅ Operativo      | PostgreSQL 16 (Docker)        |
 | Cache/Queue | ✅ Desplegado       | Redis 7 (Docker)              |
 | Auth        | ✅ Completo         | JWT (python-jose) + bcrypt 4  |
-| Infra local | ✅ Docker Compose   | Docker 29.4.2                 |
+| Tenants     | ✅ Implementado     | Docker por org (postgres:16-alpine) |
+| Infra local | ✅ Docker Compose   | Docker 29.4.2 · hostname worsyn-server |
 | Infra prod  | ⏳ Pendiente (fase 2) | AWS ECS Fargate             |
 
 ## Funcionalidades implementadas
@@ -147,3 +148,46 @@ Cuando `must_change_password: true`:
 - [x] Configuración BD: solo lectura para admin, editable para owner
 - [x] Toast notifications
 - [x] Tema claro/oscuro (localStorage)
+- [x] Métricas del sistema en tiempo real (CPU, RAM, disco, uptime, hostname, servicios)
+- [x] Organizaciones: datos reales de BD, modal de creación, vista de detalle
+- [x] Campo `email` en organizaciones (para comunicaciones del sistema con la org)
+- [x] Campo `alias` en organizaciones (identificador corto para acceso futuro del tenant)
+- [x] Eliminar organización desde la lista (con confirmación inline por fila)
+- [x] Crear usuario administrador inicial al crear una organización (sección colapsable en modal)
+- [x] Tenant por organización: aprovisionamiento automático de PostgreSQL en Docker
+- [x] Gestión de tenant desde detalle de org: start/stop/sincronizar/destruir/reaprovisionar
+- [x] Botón "Ver portal" en detalle de org → abre `/portal/:slug` en nueva pestaña
+- [x] TenantPortal (`/portal/:slug`): ruta pública, muestra login de org + dashboard simulado
+
+## Portal de organizaciones (`/portal/:slug`)
+
+Ruta pública (sin autenticación de admin) accesible desde el botón "Ver portal" en el detalle de cada organización.
+
+**Flujo actual (mock):**
+1. La URL `/portal/{slug}` carga el componente `TenantPortal`
+2. Hace `GET /api/v1/organizations/slug/{slug}` (endpoint público, sin auth) → obtiene nombre y alias
+3. Muestra formulario de login con email + contraseña
+4. Al "iniciar sesión" (simulado), transiciona a un dashboard de muestra con KPIs y paneles placeholder
+
+**Flujo futuro (pendiente de implementar):**
+1. El miembro entra a `/portal/{slug}` o `/portal/{alias}`
+2. El sistema identifica la organización por slug o alias
+3. Se autentica con su email + contraseña contra `POST /api/v1/tenant/{slug}/auth/login`
+4. Recibe un JWT de miembro (`OrgMember`) — sistema de auth separado del admin
+5. Accede al panel de gestión de su iglesia
+
+> **Nota:** El sistema de auth para `OrgMember` es completamente independiente del auth de `AdminUser`.
+> Los miembros nunca tendrán acceso al panel de administración Worsyn.
+
+## Campos de organización
+
+| Campo | Tipo | Propósito |
+|-------|------|-----------|
+| `name` | str | Nombre completo de la iglesia |
+| `slug` | str (único) | Identificador técnico, nombre del contenedor Docker |
+| `alias` | str (único, nullable) | Alias corto para que los miembros accedan al portal (ej: `bethel` → `/portal/bethel`) |
+| `email` | str (nullable) | Email de la organización para comunicaciones del sistema (avisos, facturas, alertas) |
+| `plan` | free/pro/teams | Plan de suscripción |
+| `status` | active/trial/suspended/cancelled | Estado de la suscripción |
+| `country` / `city` | str | Ubicación |
+| `phone` / `website` | str | Datos de contacto |

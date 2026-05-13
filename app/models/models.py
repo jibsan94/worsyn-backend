@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -29,10 +29,13 @@ class Organization(Base):
     city: Mapped[str | None] = mapped_column(String(100), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
     website: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    alias: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     members: Mapped[list["OrgMember"]] = relationship("OrgMember", back_populates="organization", cascade="all, delete-orphan")
+    tenant: Mapped["Tenant | None"] = relationship("Tenant", back_populates="organization", uselist=False, cascade="all, delete-orphan")
 
 
 class OrgMember(Base):
@@ -60,6 +63,27 @@ class OrgMember(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
     organization: Mapped["Organization"] = relationship("Organization", back_populates="members")
+
+
+class Tenant(Base):
+    """Docker tenant provisioned for each organization (one-to-one)."""
+    __tablename__ = "tenants"
+
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    status: Mapped[str] = mapped_column(String(50), default="provisioning")  # provisioning | running | stopped | error
+    db_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    db_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    container_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    compose_dir: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provisioned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_msg: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    organization: Mapped["Organization"] = relationship("Organization", back_populates="tenant")
 
 
 class AdminUser(Base):

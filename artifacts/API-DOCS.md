@@ -298,6 +298,9 @@ List all organizations with `member_count`.
   {
     "id": "uuid",
     "name": "Iglesia Gracia",
+    "slug": "iglesia-gracia",
+    "alias": "gracia",
+    "email": "info@iglesiagracia.es",
     "plan": "pro",
     "status": "active",
     "country": "ES",
@@ -313,7 +316,7 @@ List all organizations with `member_count`.
 ---
 
 ### POST /organizations
-Create a new organization.
+Create a new organization. **Automatically provisions a tenant PostgreSQL container** in the background (`worsyn-tenant-{slug}-db` on port 6001+).
 
 **Auth required:** admin, owner
 
@@ -321,16 +324,30 @@ Create a new organization.
 ```json
 {
   "name": "Iglesia Gracia",
+  "slug": "iglesia-gracia",
+  "alias": "gracia",
+  "email": "info@iglesiagracia.es",
   "plan": "free",
   "status": "active",
   "country": "ES",
-  "city": "Madrid",
-  "phone": "+34 600 000 000",
-  "website": "https://iglesiagracia.es"
+  "city": "Madrid"
 }
 ```
 
-**Response 201** — `OrganizationRead`
+**Response 201** — `OrganizationRead`  
+> Tenant provisioning runs async. Poll `GET /organizations/{id}/tenant` to check status.
+
+---
+
+### GET /organizations/slug/{slug}
+**PUBLIC — no auth required.** Returns basic org info by slug. Used by TenantPortal.
+
+**Response 200**
+```json
+{ "id": "uuid", "name": "Iglesia Gracia", "slug": "iglesia-gracia", "alias": "gracia", "plan": "pro" }
+```
+
+**Response 404** if org not found.
 
 ---
 
@@ -343,7 +360,7 @@ Get a single organization with `member_count`.
 ---
 
 ### PATCH /organizations/{org_id}
-Update organization fields (partial update).
+Update organization fields (partial update). Supports `email` and `alias`.
 
 **Auth required:** admin, owner  
 **Response 200** — `OrganizationRead`
@@ -351,10 +368,77 @@ Update organization fields (partial update).
 ---
 
 ### DELETE /organizations/{org_id}
-Delete an organization and all its members.
+Delete an organization and all its members. Also destroys the tenant container.
 
 **Auth required:** owner only  
 **Response 204** — No content
+
+---
+
+## Tenant Management
+
+Each organization has exactly one tenant: an isolated PostgreSQL container.
+
+### GET /organizations/{org_id}/tenant
+Get tenant info for an organization.
+
+**Auth required:** admin, owner
+
+**Response 200**
+```json
+{
+  "org_id": "uuid",
+  "status": "running",
+  "db_port": 6001,
+  "container_name": "worsyn-tenant-iglesia-gracia-db",
+  "compose_dir": "/mnt/tenants/iglesia-gracia",
+  "provisioned_at": "2026-05-13T20:00:00+00:00",
+  "error_msg": null,
+  "updated_at": "2026-05-13T20:00:00+00:00"
+}
+```
+
+Tenant statuses: `provisioning` | `running` | `stopped` | `error`
+
+---
+
+### POST /organizations/{org_id}/tenant/start
+Start a stopped tenant container.
+
+**Auth required:** admin, owner  
+**Response 200** — `TenantRead`
+
+---
+
+### POST /organizations/{org_id}/tenant/stop
+Stop a running tenant container.
+
+**Auth required:** admin, owner  
+**Response 200** — `TenantRead`
+
+---
+
+### POST /organizations/{org_id}/tenant/refresh
+Sync tenant status with actual Docker container state.
+
+**Auth required:** admin, owner  
+**Response 200** — `TenantRead`
+
+---
+
+### DELETE /organizations/{org_id}/tenant
+**Destroy** the tenant container (removes it from Docker). The org record is kept. Sets tenant status to `stopped`. Use `POST /provision` to create a new container.
+
+**Auth required:** admin, owner  
+**Response 204** — No content
+
+---
+
+### POST /organizations/{org_id}/tenant/provision
+(Re-)provision the tenant container. Creates a new PostgreSQL Docker container. Used after destroying a tenant or if initial provisioning failed.
+
+**Auth required:** admin, owner  
+**Response 200** — `TenantRead` (status = `provisioning`, completes async)
 
 ---
 

@@ -2,18 +2,22 @@
 
 ## Infraestructura actual
 
-| Servicio    | Imagen Docker          | Puerto | Nombre contenedor  |
-|-------------|------------------------|--------|--------------------|
-| Frontend    | worsyn-dashboard       | 3001   | worsyn-dashboard   |
-| Backend     | worsyn-backend-backend | 8000   | worsyn-backend     |
-| PostgreSQL  | postgres:16-alpine     | 5432   | worsyn-db          |
-| Redis       | redis:7-alpine         | 6379   | worsyn-redis       |
+| Servicio    | Imagen Docker              | Puerto | Nombre contenedor  |
+|-------------|----------------------------|--------|--------------------||
+| Frontend    | worsyn-dashboard-frontend  | 80     | worsyn-dashboard   |
+| Backend     | worsyn-backend-backend     | 8000   | worsyn-backend     |
+| PostgreSQL  | postgres:16-alpine         | 5432   | worsyn-db          |
+| Redis       | redis:7-alpine             | 6379   | worsyn-redis       |
+| Tenant DB * | postgres:16-alpine         | 6001+  | worsyn-tenant-{slug}-db |
 
-- **Servidor:** 192.168.64.27 (root), RHEL/CentOS, Docker 29.4.2
-- **Compose file:** `/mnt/worsyn-backend/docker-compose.yml`
+\* Un contenedor PostgreSQL independiente por organización, gestionado dinámicamente.
+
+- **Servidor:** 10.211.55.11 · hostname `worsyn-server` (root), Debian/Ubuntu, Docker 29.4.2
+- **Compose file backend:** `/mnt/worsyn-backend/docker-compose.yml`
 - **Frontend source:** `/mnt/worsyn-dashboard/`
 - **Backend source:** `/mnt/worsyn-backend/`
-- **Artefactos / docs:** `/mnt/worsyn/`
+- **Artefactos / docs:** `/mnt/worsyn-backend/artifacts/`
+- **Tenants:** `/mnt/tenants/{slug}/` (docker-compose.yml + data/)
 
 ### Deploy del frontend (sin rebuilkit)
 ```bash
@@ -26,9 +30,7 @@ docker cp /mnt/worsyn-dashboard/dist/. worsyn-dashboard:/usr/share/nginx/html/
 > Docker Hub no tiene acceso a internet desde este servidor. Los builds usan `DOCKER_BUILDKIT=0` o el enfoque de compilar dentro del contenedor node local.
 
 ### Proxy nginx
-El contenedor nginx (`worsyn-dashboard`) tiene proxy configurado en `/etc/nginx/conf.d/default.conf`:
-- `/api/` → `http://192.168.64.27:8000/api/`
-- `/` → SPA fallback (index.html)
+El contenedor nginx (`worsyn-dashboard`) proxea `/api/` → `http://10.211.55.11:8000/api/`.
 El archivo fuente es `/mnt/worsyn-dashboard/nginx.conf`.
 
 ---
@@ -60,10 +62,11 @@ src/
 │   ├── Login.tsx             # Página pública de login
 │   ├── Profile.tsx           # Perfil + cambio de contraseña (solo desde dropdown)
 │   ├── Dashboard.tsx
-│   ├── Organizations.tsx
+│   ├── Organizations.tsx     # Lista orgs (datos reales) + modal crear org
+│   ├── OrganizationDetail.tsx# Detalle org + gestión tenant Docker
 │   ├── Users.tsx             # org_members (fase 2)
 │   ├── SystemUsers.tsx       # CRUD admin_users — solo admin/owner
-│   ├── System.tsx
+│   ├── System.tsx            # Métricas host en tiempo real (psutil + Docker)
 │   ├── Settings.tsx          # Config BD — owner edita, admin solo lectura
 │   ├── SettingsSecurity.tsx
 │   ├── SettingsGeneral.tsx
@@ -73,17 +76,18 @@ src/
 ```
 
 ### Rutas y permisos
-| Ruta                   | Guard                         | Rol mínimo |
-|------------------------|-------------------------------|------------|
-| `/login`               | Pública                       | —          |
-| `/`                    | ProtectedRoute                | any        |
-| `/organizations`       | ProtectedRoute                | any        |
-| `/users`               | ProtectedRoute                | any        |
-| `/billing`             | ProtectedRoute                | any        |
-| `/profile`             | ProtectedRoute                | any        |
-| `/system`              | ProtectedRoute                | any (sidebar solo admin+) |
-| `/system-users`        | ProtectedRoute + RoleRoute    | admin, owner |
-| `/settings/*`          | ProtectedRoute + RoleRoute    | admin, owner |
+| Ruta                       | Guard                         | Rol mínimo |
+|----------------------------|-------------------------------|------------|
+| `/login`                   | Pública                       | —          |
+| `/`                        | ProtectedRoute                | any        |
+| `/organizations`           | ProtectedRoute                | any        |
+| `/organizations/:id`       | ProtectedRoute                | any (tenant: admin+) |
+| `/users`                   | ProtectedRoute                | any        |
+| `/billing`                 | ProtectedRoute                | any        |
+| `/profile`                 | ProtectedRoute                | any        |
+| `/system`                  | ProtectedRoute                | any (sidebar solo admin+) |
+| `/system-users`            | ProtectedRoute + RoleRoute    | admin, owner |
+| `/settings/*`              | ProtectedRoute + RoleRoute    | admin, owner |
 
 ---
 
@@ -103,7 +107,11 @@ src/
 ### Modelos de base de datos
 ```
 organizations    — tenants (iglesias cliente)
-  id, name, plan, status, country, city, phone, website, created_at
+  id, name, slug, plan, status, country, city, phone, website, created_at
+
+tenants          — tenant Docker por organización (one-to-one con organizations)
+  org_id (PK+FK), status, db_port, db_password, container_name,
+  compose_dir, provisioned_at, error_msg, updated_at
 
 org_members      — usuarios de cada iglesia (no tienen acceso al panel)
   id, org_id, email, full_name, role, is_active, created_at
