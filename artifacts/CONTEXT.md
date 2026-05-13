@@ -158,6 +158,18 @@ Cuando `must_change_password: true`:
 - [x] Gestión de tenant desde detalle de org: start/stop/sincronizar/destruir/reaprovisionar
 - [x] Botón "Ver portal" en detalle de org → abre `/portal/:slug` en nueva pestaña
 - [x] TenantPortal (`/portal/:slug`): ruta pública, muestra login de org + dashboard simulado
+- [x] Vista global de usuarios (miembros de org) en `/users` con filtros y KPIs
+- [x] Vista detalle de miembro en `/users/:id` — editable para admin/owner
+- [x] Rol de OrgMember: `admin` (admin de la org) y `leader` (líder), extensible
+
+## Roles de OrgMember
+
+| Rol | Descripción | Creado cuando |
+|-----|-------------|---------------|
+| `admin` | Administrador de la organización. Gestión completa dentro de la iglesia | Usuario inicial al crear una org |
+| `leader` | Líder (ej: líder de alabanza, líder de jóvenes). Acceso parcial | Por defecto al añadir miembros manualmente |
+
+> En el futuro se pueden añadir más roles sin cambiar la arquitectura.
 
 ## Portal de organizaciones (`/portal/:slug`)
 

@@ -442,6 +442,53 @@ Sync tenant status with actual Docker container state.
 
 ---
 
+## Members (global — across all organizations)
+
+Used by the admin Users page to view and manage org members regardless of their organization.
+
+### GET /members/
+List all org members with optional filters. Includes `org_name` and `org_slug` from the parent organization.
+
+**Auth required:** any role  
+**Query params:** `org_id` (UUID), `role` (admin|leader), `is_active` (bool), `search` (string — matches name or email), `skip`, `limit`
+
+**Response 200**
+```json
+[
+  {
+    "id": "uuid", "org_id": "uuid", "org_name": "Comunidad Cristiana", "org_slug": "comunidad-cristiana",
+    "email": "pastor@iglesia.com", "full_name": "Pastor Juan", "phone": null,
+    "role": "admin", "is_active": true, "joined_at": "...", "updated_at": "..."
+  }
+]
+```
+
+---
+
+### GET /members/{member_id}
+Get a single org member by ID (any org).
+
+**Auth required:** any role  
+**Response 200** — `OrgMemberWithOrg`
+
+---
+
+### PATCH /members/{member_id}
+Update an org member (partial). Supports: `full_name`, `email`, `phone`, `role`, `is_active`, `password`.
+
+**Auth required:** admin, owner  
+**Response 200** — `OrgMemberWithOrg`
+
+---
+
+### DELETE /members/{member_id}
+Delete an org member.
+
+**Auth required:** admin, owner  
+**Response 204** — No content
+
+---
+
 ## Org Members
 
 All org member endpoints are nested under `/organizations/{org_id}/members`.  

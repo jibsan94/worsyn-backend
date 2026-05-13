@@ -66,14 +66,14 @@ class OrganizationRead(OrganizationBase):
 
 # ── OrgMember (tenant user — belongs to one organization) ────────────────────
 
-OrgMemberRole = Literal["owner", "admin", "member", "viewer"]
+OrgMemberRole = Literal["admin", "leader"]
 
 
 class OrgMemberBase(BaseModel):
     email: str
     full_name: str | None = None
     phone: str | None = None
-    role: OrgMemberRole = "member"
+    role: OrgMemberRole = "leader"
 
     @field_validator("email")
     @classmethod
@@ -118,6 +118,12 @@ class OrgMemberRead(OrgMemberBase):
     is_active: bool
     joined_at: datetime
     updated_at: datetime
+
+
+class OrgMemberWithOrg(OrgMemberRead):
+    """OrgMemberRead extended with parent org info — used by global /members/ endpoint."""
+    org_name: str | None = None
+    org_slug: str | None = None
 
 
 # ── Admin ─────────────────────────────────────────────────────────────────────
