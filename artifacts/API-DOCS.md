@@ -489,6 +489,46 @@ Delete an org member.
 
 ---
 
+## Org Roles
+
+Manages the configurable roles available for org members. Stored in `org_roles` table.
+System roles (`is_system=true`) cannot be deleted. Custom roles can be deleted if no members are assigned.
+
+### GET /org-roles/
+List all org roles ordered by `sort_order`. Includes `member_count` per role.
+
+**Auth required:** any role
+
+**Response 200**
+```json
+[
+  { "id": "uuid", "slug": "admin", "name": "Administrador de Organización", "description": "...", "is_system": true, "sort_order": 0, "member_count": 3, "created_at": "...", "updated_at": "..." },
+  { "id": "uuid", "slug": "leader", "name": "Líder", "is_system": true, "sort_order": 1, "member_count": 7, ... },
+  { "id": "uuid", "slug": "member", "name": "Miembro", "is_system": true, "sort_order": 2, "member_count": 42, ... }
+]
+```
+
+### POST /org-roles/
+Create a new custom role. Slug must be unique, lowercase, letters/numbers/hyphens/underscores only.
+
+**Auth required:** admin, owner  
+**Body:** `{ slug, name, description?, sort_order? }`  
+**Response 201** — `OrgRoleRead`
+
+### PATCH /org-roles/{id}
+Update role metadata (`name`, `description`, `sort_order`). Works for all roles including system ones.
+
+**Auth required:** admin, owner  
+**Response 200** — `OrgRoleRead`
+
+### DELETE /org-roles/{id}
+Delete a custom role. Fails if `is_system=true` or if any members have this role.
+
+**Auth required:** owner only  
+**Response 204** — No content
+
+---
+
 ## Org Members
 
 All org member endpoints are nested under `/organizations/{org_id}/members`.  

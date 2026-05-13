@@ -160,16 +160,20 @@ Cuando `must_change_password: true`:
 - [x] TenantPortal (`/portal/:slug`): ruta pública, muestra login de org + dashboard simulado
 - [x] Vista global de usuarios (miembros de org) en `/users` con filtros y KPIs
 - [x] Vista detalle de miembro en `/users/:id` — editable para admin/owner
-- [x] Rol de OrgMember: `admin` (admin de la org) y `leader` (líder), extensible
+- [x] Rol de OrgMember: `admin`, `leader`, `member` — gestionables desde Configuración
+- [x] Tabla `org_roles`: define roles disponibles para org members, con CRUD en `/settings/roles`
 
 ## Roles de OrgMember
 
-| Rol | Descripción | Creado cuando |
-|-----|-------------|---------------|
-| `admin` | Administrador de la organización. Gestión completa dentro de la iglesia | Usuario inicial al crear una org |
-| `leader` | Líder (ej: líder de alabanza, líder de jóvenes). Acceso parcial | Por defecto al añadir miembros manualmente |
+| Rol | Slug | Descripción | Tipo |
+|-----|------|-------------|------|
+| Administrador de Organización | `admin` | Gestión completa dentro de la org | Sistema |
+| Líder | `leader` | Líder de equipo o área (alabanza, jóvenes, etc.) | Sistema |
+| Miembro | `member` | Miembro activo de la organización | Sistema |
 
-> En el futuro se pueden añadir más roles sin cambiar la arquitectura.
+Los roles están almacenados en la tabla `org_roles`. Los roles de sistema (`is_system=true`) no se pueden eliminar pero sí editar su nombre/descripción/orden. Se pueden crear roles personalizados adicionales desde **Configuración → Roles de org**.
+
+El campo `org_members.role` almacena el slug del rol (`admin`, `leader`, `member`, o cualquier slug personalizado creado).
 
 ## Portal de organizaciones (`/portal/:slug`)
 

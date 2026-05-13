@@ -66,14 +66,14 @@ class OrganizationRead(OrganizationBase):
 
 # ── OrgMember (tenant user — belongs to one organization) ────────────────────
 
-OrgMemberRole = Literal["admin", "leader"]
+OrgMemberRole = Literal["admin", "leader", "member"]
 
 
 class OrgMemberBase(BaseModel):
     email: str
     full_name: str | None = None
     phone: str | None = None
-    role: OrgMemberRole = "leader"
+    role: OrgMemberRole = "member"
 
     @field_validator("email")
     @classmethod
@@ -124,6 +124,43 @@ class OrgMemberWithOrg(OrgMemberRead):
     """OrgMemberRead extended with parent org info — used by global /members/ endpoint."""
     org_name: str | None = None
     org_slug: str | None = None
+
+
+# ── OrgRole ───────────────────────────────────────────────────────────────────
+
+class OrgRoleBase(BaseModel):
+    name: str
+    description: str | None = None
+    sort_order: int = 0
+
+
+class OrgRoleCreate(OrgRoleBase):
+    slug: str
+
+    @field_validator("slug")
+    @classmethod
+    def slug_valid(cls, v: str) -> str:
+        import re
+        if not re.match(r'^[a-z0-9_-]+$', v):
+            raise ValueError("Slug must contain only lowercase letters, numbers, hyphens and underscores")
+        return v
+
+
+class OrgRoleUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    sort_order: int | None = None
+
+
+class OrgRoleRead(OrgRoleBase):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    slug: str
+    is_system: bool
+    created_at: datetime
+    updated_at: datetime
+    member_count: int = 0  # populated by the endpoint
 
 
 # ── Admin ─────────────────────────────────────────────────────────────────────
