@@ -19,7 +19,7 @@ from app.api.v1.endpoints.auth import get_current_user, require_role
 from app.core.security import hash_password
 from app.db.session import get_db
 from app.models.models import AdminUser
-from app.schemas.schemas import AdminUserCreate, AdminUserRead, AdminUserUpdate
+from app.schemas.schemas import AdminUserAvatarUpdate, AdminUserCreate, AdminUserRead, AdminUserUpdate
 
 router = APIRouter(prefix="/admin/users", tags=["Admin User Management"])
 
@@ -155,6 +155,30 @@ async def update_admin_user(
         target.hashed_password = hash_password(payload.password)
         target.must_change_password = True
 
+    await db.commit()
+    await db.refresh(target)
+    return target
+
+
+@router.put("/{user_id}/avatar", response_model=AdminUserRead)
+async def update_avatar(
+    user_id: uuid.UUID,
+    payload: AdminUserAvatarUpdate,
+    db: AsyncSession = Depends(get_db),
+    actor: AdminUser = Depends(get_current_user),
+):
+    """Update (or remove) a user's avatar. Any user can update their own; admin/owner can update others."""
+    target = await _get_or_404(db, user_id)
+
+    if actor.id != target.id:
+        if actor.role not in ("admin", "owner"):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+        _guard_owner_target(actor, target)
+
+    if payload.avatar is not None and len(payload.avatar) > 13_631_489:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Avatar too large (max 10 MB)")
+
+    target.avatar = payload.avatar
     await db.commit()
     await db.refresh(target)
     return target

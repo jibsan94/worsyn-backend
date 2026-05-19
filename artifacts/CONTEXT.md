@@ -106,8 +106,10 @@ Cuando `must_change_password: true`:
 
 - Acceso: **solo desde el dropdown del avatar** (arriba derecha) → opción "Perfil"
 - Ruta: `/profile` — protegida, no aparece en el sidebar
-- Muestra: datos de la cuenta (usuario, nombre, email, rol) + formulario de cambio de contraseña
+- Muestra: datos de la cuenta (usuario, nombre, email, rol) + formulario de cambio de contraseña + upload de foto de perfil
 - El cambio de contraseña llama a `POST /api/v1/auth/change-credentials`
+- El avatar se guarda via `PUT /api/v1/admin/users/{id}/avatar` (base64 JPEG, max ~450 KB)
+- Avatar visible en el navbar (esquina superior derecha); si no tiene foto, se muestran iniciales
 - Disponible para todos los roles (`user`, `admin`, `owner`)
 
 ## Dropdown del avatar (navbar)
@@ -142,7 +144,7 @@ Cuando `must_change_password: true`:
 - [x] Logout desde el dropdown del avatar
 - [x] Sidebar con secciones condicionales por rol
 - [x] Alerta `must_change_password` en el Layout
-- [x] Página Perfil con cambio de contraseña
+- [x] Página Perfil con cambio de contraseña y upload de foto de perfil (base64, resize automático a 256×256)
 - [x] CRUD completo de `system_users` con permisos por rol
 - [x] Auto-refresco de sesión al editarse a sí mismo
 - [x] Configuración BD: solo lectura para admin, editable para owner

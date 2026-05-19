@@ -19,7 +19,20 @@
 - **Artefactos / docs:** `/mnt/worsyn-backend/artifacts/`
 - **Tenants:** `/mnt/tenants/{slug}/` (docker-compose.yml + data/)
 
-### Deploy del frontend (sin rebuilkit)
+### Levantar el sistema completo
+```bash
+# 1. Backend (DB + Redis + API) — desde /mnt/worsyn-backend
+cd /mnt/worsyn-backend && docker compose up -d
+
+# 2. Frontend — ya corre como contenedor permanente (worsyn-dashboard)
+#    Si está caído: docker start worsyn-dashboard
+
+# Verificar todo
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+curl http://localhost:8000/api/v1/health
+```
+
+### Deploy del frontend (sin rebuild desde Docker Hub)
 ```bash
 # Compilar
 docker run --rm -v /mnt/worsyn-dashboard:/app -w /app node:20-alpine sh -c "npm run build"
@@ -27,7 +40,7 @@ docker run --rm -v /mnt/worsyn-dashboard:/app -w /app node:20-alpine sh -c "npm 
 docker exec worsyn-dashboard sh -c "rm -rf /usr/share/nginx/html/*"
 docker cp /mnt/worsyn-dashboard/dist/. worsyn-dashboard:/usr/share/nginx/html/
 ```
-> Docker Hub no tiene acceso a internet desde este servidor. Los builds usan `DOCKER_BUILDKIT=0` o el enfoque de compilar dentro del contenedor node local.
+> Docker Hub no tiene acceso a internet desde este servidor. Los builds usan el contenedor node:20-alpine local.
 
 ### Proxy nginx
 El contenedor nginx (`worsyn-dashboard`) proxea `/api/` → `http://10.211.55.11:8000/api/`.
@@ -118,7 +131,8 @@ org_members      — usuarios de cada iglesia (no tienen acceso al panel)
 
 system_users     — operadores del panel Worsyn (antes: admin_users)
   id, username, email, hashed_password, full_name, role,
-  is_active, must_change_password, created_at, last_login_at
+  is_active, must_change_password, avatar (TEXT nullable — base64 data URL, max ~450 KB),
+  created_at, last_login_at
 
 system_settings  — configuración clave-valor del sistema
   id, key, value, updated_at

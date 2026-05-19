@@ -177,6 +177,7 @@ List all platform users.
     "role": "admin",
     "is_active": true,
     "must_change_password": true,
+    "avatar": null,
     "created_at": "2026-05-11T14:00:00+00:00",
     "last_login_at": null
   }
@@ -265,6 +266,35 @@ If `password` is provided, `must_change_password` is reset to `true`.
 | 404  | User not found |
 | 409  | Username already taken |
 | 409  | Email already registered |
+
+---
+
+### PUT /admin/users/{user_id}/avatar
+Update or remove the avatar for a platform user.
+- Any authenticated user can update **their own** avatar.
+- Admin/owner can update other users' avatars (with owner-protection rule).
+
+**Auth required:** any authenticated user (own avatar); admin/owner (others)
+
+**Request body**
+```json
+{ "avatar": "data:image/jpeg;base64,/9j/4AA..." }
+```
+Set `avatar` to `null` to remove the current avatar.
+
+| Field    | Type          | Notes |
+|----------|---------------|-------|
+| `avatar` | string\|null  | Base64 data URL. Max ~450 KB encoded. |
+
+**Response 200** — `AdminUserRead`
+
+**Errors**
+
+| Code | Detail |
+|------|--------|
+| 403  | Insufficient permissions |
+| 404  | User not found |
+| 413  | Avatar too large (max ~450 KB) |
 
 ---
 
@@ -815,6 +845,7 @@ List all platform users.
     "role": "admin",
     "is_active": true,
     "must_change_password": true,
+    "avatar": null,
     "created_at": "2026-05-11T14:00:00+00:00",
     "last_login_at": null
   }

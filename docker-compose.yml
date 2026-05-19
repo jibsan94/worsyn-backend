@@ -3,6 +3,7 @@ services:
   backend:
     build: .
     container_name: worsyn-backend
+    hostname: worsyn-server
     ports:
       - "8000:8000"
     environment:

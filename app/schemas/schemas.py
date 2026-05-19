@@ -178,8 +178,13 @@ class AdminUserRead(BaseModel):
     role: AdminUserRole
     is_active: bool
     must_change_password: bool
+    avatar: str | None = None
     created_at: datetime
     last_login_at: datetime | None
+
+
+class AdminUserAvatarUpdate(BaseModel):
+    avatar: str | None  # base64 data URL or None to remove
 
 
 class AdminUserCreate(BaseModel):
