@@ -155,6 +155,15 @@ async def update_admin_user(
         target.hashed_password = hash_password(payload.password)
         target.must_change_password = True
 
+    # Only owner can change 2FA status of another user
+    if payload.two_factor_enabled is not None:
+        if actor.role != "owner":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only owners can modify another user's 2FA status",
+            )
+        target.two_factor_enabled = payload.two_factor_enabled
+
     await db.commit()
     await db.refresh(target)
     return target
@@ -179,6 +188,37 @@ async def update_avatar(
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Avatar too large (max 10 MB)")
 
     target.avatar = payload.avatar
+    await db.commit()
+    await db.refresh(target)
+    return target
+
+
+@router.delete("/{user_id}/2fa", status_code=status.HTTP_204_NO_CONTENT)
+async def reset_2fa(
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    actor: AdminUser = Depends(require_role("owner")),
+):
+    """Reset (disable) 2FA for a user. Owner only."""
+    target = await _get_or_404(db, user_id)
+    target.two_factor_enabled = False
+    await db.commit()
+
+
+@router.put("/{user_id}/2fa", response_model=AdminUserRead)
+async def toggle_own_2fa(
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    actor: AdminUser = Depends(get_current_user),
+):
+    """Toggle 2FA on/off for own account. Any authenticated user can manage their own."""
+    target = await _get_or_404(db, user_id)
+    if actor.id != target.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only manage your own 2FA",
+        )
+    target.two_factor_enabled = not target.two_factor_enabled
     await db.commit()
     await db.refresh(target)
     return target

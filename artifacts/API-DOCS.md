@@ -315,6 +315,38 @@ Delete a platform user. Admin cannot delete owner accounts. No user can delete t
 
 ---
 
+### PUT /admin/users/{user_id}/2fa
+Toggle 2FA on/off for **own account only**. Any authenticated user can manage their own.
+
+**Auth required:** any authenticated user (only own account)
+
+**Response 200** — returns updated `AdminUserRead`
+
+**Errors**
+
+| Code | Detail |
+|------|--------|
+| 403  | You can only manage your own 2FA |
+| 404  | User not found |
+
+---
+
+### DELETE /admin/users/{user_id}/2fa
+Reset (disable) 2FA for a user. **Owner only.**
+
+**Auth required:** owner
+
+**Response 204** — No content
+
+**Errors**
+
+| Code | Detail |
+|------|--------|
+| 403  | Insufficient permissions |
+| 404  | User not found |
+
+---
+
 ## Organizations
 
 ### GET /organizations
@@ -1044,6 +1076,59 @@ Test a database connection without saving the configuration.
 
 ---
 
+### GET /admin/settings/security
+Return current security config.
+
+**Auth required:** Yes — `admin` or `owner`
+
+**Response 200**
+```json
+{
+  "password_min_length": 8,
+  "password_require_uppercase": false,
+  "password_require_numbers": false,
+  "password_require_special": false,
+  "password_max_age_days": 0,
+  "session_access_token_minutes": 30,
+  "session_refresh_token_days": 7,
+  "max_sessions_per_user": 0,
+  "two_factor_enabled": false,
+  "readonly": false
+}
+```
+`readonly: true` when caller is `admin` (not `owner`).
+
+---
+
+### POST /admin/settings/security
+Persist security config to `system_settings` table.
+
+**Auth required:** Yes — `owner` only
+
+**Request body**
+```json
+{
+  "password_min_length": 10,
+  "password_require_uppercase": true,
+  "password_require_numbers": true,
+  "password_require_special": false,
+  "password_max_age_days": 90,
+  "session_access_token_minutes": 60,
+  "session_refresh_token_days": 14,
+  "max_sessions_per_user": 3,
+  "two_factor_enabled": false
+}
+```
+
+**Response 200**
+```json
+{ "status": "saved" }
+```
+
+Settings stored as `security.*` keys in `system_settings` (e.g. `security.password_min_length`).
+
+---
+
 ## Organizations
 
 All organization endpoints require authentication. Write operations (create/update/delete) require `admin` or `owner`.
@@ -1285,4 +1370,4 @@ Remove a member from an organization.
 
 ---
 
-*Last updated: 2026-05-11 — endpoints: health, auth (login/me/change-credentials), organizations (CRUD + member_count), org_members (CRUD nested), admin/users (CRUD), admin/settings/database*
+*Last updated: 2026-05-19 — endpoints: health, auth, organizations (CRUD), org_members (CRUD), org_roles (CRUD), admin/users (CRUD + avatar + 2FA toggle/reset), admin/settings/database, admin/settings/security*

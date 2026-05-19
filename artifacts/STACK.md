@@ -131,7 +131,8 @@ org_members      — usuarios de cada iglesia (no tienen acceso al panel)
 
 system_users     — operadores del panel Worsyn (antes: admin_users)
   id, username, email, hashed_password, full_name, role,
-  is_active, must_change_password, avatar (TEXT nullable — base64 data URL, max ~450 KB),
+  is_active, must_change_password, two_factor_enabled,
+  avatar (TEXT nullable — base64 data URL, max ~450 KB),
   created_at, last_login_at
 
 system_settings  — configuración clave-valor del sistema

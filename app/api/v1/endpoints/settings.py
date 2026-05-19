@@ -1,23 +1,50 @@
-"""Admin settings endpoints (database config, system config).
+"""Admin settings endpoints (database config, security config).
 
 Access:
   - GET /database: admin + owner (read)
   - POST /database: owner only (write)
   - POST /database/test: admin + owner (non-destructive)
+  - GET /security: admin + owner (read)
+  - POST /security: owner only (write)
 """
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.auth import get_current_user, require_role
 from app.db.session import get_db
-from app.models.models import AdminUser
-from app.schemas.schemas import DatabaseConfigWrite
+from app.models.models import AdminUser, SystemSetting
+from app.schemas.schemas import DatabaseConfigWrite, SecurityConfigRead, SecurityConfigWrite
 
 router = APIRouter(prefix="/admin/settings", tags=["Admin Settings"])
 
 SUPPORTED_ENGINES = {"postgresql", "mysql", "mariadb"}
+
+SECURITY_DEFAULTS: dict[str, str] = {
+    "security.password_min_length": "8",
+    "security.password_require_uppercase": "false",
+    "security.password_require_numbers": "false",
+    "security.password_require_special": "false",
+    "security.password_max_age_days": "0",
+    "security.session_access_token_minutes": "30",
+    "security.session_refresh_token_days": "7",
+    "security.max_sessions_per_user": "0",
+    "security.require_2fa": "false",
+}
+
+
+async def _get_security_settings(db: AsyncSession) -> dict[str, str]:
+    result = await db.execute(
+        select(SystemSetting).where(SystemSetting.key.like("security.%"))
+    )
+    rows = result.scalars().all()
+    settings = dict(SECURITY_DEFAULTS)
+    for row in rows:
+        if row.value is not None:
+            settings[row.key] = row.value
+    return settings
 
 
 @router.get("/database")
@@ -65,3 +92,53 @@ async def test_database_connection(
             detail=f"Unsupported engine '{payload.engine}'. Supported: {sorted(SUPPORTED_ENGINES)}",
         )
     return {"status": "ok", "latency_ms": 12}
+
+
+@router.get("/security", response_model=SecurityConfigRead)
+async def get_security_config(
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_role("admin", "owner")),
+):
+    """Return current security config. Admin+owner read, owner edit."""
+    s = await _get_security_settings(db)
+    return SecurityConfigRead(
+        password_min_length=int(s["security.password_min_length"]),
+        password_require_uppercase=s["security.password_require_uppercase"] == "true",
+        password_require_numbers=s["security.password_require_numbers"] == "true",
+        password_require_special=s["security.password_require_special"] == "true",
+        password_max_age_days=int(s["security.password_max_age_days"]),
+        session_access_token_minutes=int(s["security.session_access_token_minutes"]),
+        session_refresh_token_days=int(s["security.session_refresh_token_days"]),
+        max_sessions_per_user=int(s["security.max_sessions_per_user"]),
+        require_2fa=s["security.require_2fa"] == "true",
+        readonly=user.role != "owner",
+    )
+
+
+@router.post("/security")
+async def save_security_config(
+    payload: SecurityConfigWrite,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_role("owner")),
+):
+    """Persist security config to system_settings. Owner only."""
+    updates = {
+        "security.password_min_length": str(payload.password_min_length),
+        "security.password_require_uppercase": str(payload.password_require_uppercase).lower(),
+        "security.password_require_numbers": str(payload.password_require_numbers).lower(),
+        "security.password_require_special": str(payload.password_require_special).lower(),
+        "security.password_max_age_days": str(payload.password_max_age_days),
+        "security.session_access_token_minutes": str(payload.session_access_token_minutes),
+        "security.session_refresh_token_days": str(payload.session_refresh_token_days),
+        "security.max_sessions_per_user": str(payload.max_sessions_per_user),
+        "security.require_2fa": str(payload.require_2fa).lower(),
+    }
+    for key, value in updates.items():
+        result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
+        row = result.scalar_one_or_none()
+        if row:
+            row.value = value
+        else:
+            db.add(SystemSetting(key=key, value=value))
+    await db.commit()
+    return {"status": "saved"}

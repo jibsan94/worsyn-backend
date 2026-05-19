@@ -164,6 +164,11 @@ Cuando `must_change_password: true`:
 - [x] Vista detalle de miembro en `/users/:id` — editable para admin/owner
 - [x] Rol de OrgMember: `admin`, `leader`, `member` — gestionables desde Configuración
 - [x] Tabla `org_roles`: define roles disponibles para org members, con CRUD en `/settings/roles`
+- [x] Configuración de Seguridad: políticas de contraseñas, sesiones, política 2FA global — `GET/POST /api/v1/admin/settings/security`, persiste en `system_settings` con keys `security.*`
+- [x] Campo `two_factor_enabled` en `system_users` — cada usuario gestiona su propio 2FA
+- [x] Vista detalle de usuario del sistema (`/system-users/:id`) — editar campos, restablecer contraseña, toggle/reset 2FA
+- [x] Owner puede desactivar el 2FA de otro usuario (`DELETE /api/v1/admin/users/{id}/2fa`)
+- [x] Filas de SystemUsers clickeables → navegan a detalle del usuario
 
 ## Roles de OrgMember
 

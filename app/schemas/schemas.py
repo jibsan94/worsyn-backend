@@ -178,6 +178,7 @@ class AdminUserRead(BaseModel):
     role: AdminUserRole
     is_active: bool
     must_change_password: bool
+    two_factor_enabled: bool
     avatar: str | None = None
     created_at: datetime
     last_login_at: datetime | None
@@ -223,6 +224,7 @@ class AdminUserUpdate(BaseModel):
     role: AdminUserRole | None = None
     is_active: bool | None = None
     password: str | None = None
+    two_factor_enabled: bool | None = None  # owner-only field
 
     @field_validator("email")
     @classmethod
@@ -248,6 +250,31 @@ class DatabaseConfigWrite(BaseModel):
     name: str
     user: str
     password: str
+
+
+class SecurityConfigRead(BaseModel):
+    password_min_length: int = 8
+    password_require_uppercase: bool = False
+    password_require_numbers: bool = False
+    password_require_special: bool = False
+    password_max_age_days: int = 0
+    session_access_token_minutes: int = 30
+    session_refresh_token_days: int = 7
+    max_sessions_per_user: int = 0
+    require_2fa: bool = False  # system-wide policy: all users must have 2FA
+    readonly: bool = False
+
+
+class SecurityConfigWrite(BaseModel):
+    password_min_length: int = 8
+    password_require_uppercase: bool = False
+    password_require_numbers: bool = False
+    password_require_special: bool = False
+    password_max_age_days: int = 0
+    session_access_token_minutes: int = 30
+    session_refresh_token_days: int = 7
+    max_sessions_per_user: int = 0
+    require_2fa: bool = False  # system-wide policy
 
 
 class HealthResponse(BaseModel):
