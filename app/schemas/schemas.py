@@ -261,7 +261,15 @@ class SecurityConfigRead(BaseModel):
     session_access_token_minutes: int = 30
     session_refresh_token_days: int = 7
     max_sessions_per_user: int = 0
-    require_2fa: bool = False  # system-wide policy: all users must have 2FA
+    require_2fa: bool = False
+    # SSO / Active Directory — pending implementation
+    sso_enabled: bool = False
+    sso_provider: str = "ldap"
+    sso_ad_server: str = ""
+    sso_ad_base_dn: str = ""
+    sso_ad_bind_dn: str = ""
+    sso_ad_domain: str = ""
+    sso_ad_user_filter: str = "(sAMAccountName={username})"
     readonly: bool = False
 
 
@@ -274,7 +282,33 @@ class SecurityConfigWrite(BaseModel):
     session_access_token_minutes: int = 30
     session_refresh_token_days: int = 7
     max_sessions_per_user: int = 0
-    require_2fa: bool = False  # system-wide policy
+    require_2fa: bool = False
+    # SSO / Active Directory
+    sso_enabled: bool = False
+    sso_provider: str = "ldap"
+    sso_ad_server: str = ""
+    sso_ad_base_dn: str = ""
+    sso_ad_bind_dn: str = ""
+    sso_ad_bind_password: str = ""  # stored plain — encrypt before production
+    sso_ad_domain: str = ""
+    sso_ad_user_filter: str = "(sAMAccountName={username})"
+
+
+class GeneralConfigRead(BaseModel):
+    platform_name: str = "Worsyn"
+    support_email: str = ""
+    timezone: str = "UTC"
+    maintenance_mode: bool = False
+    maintenance_message: str = "El sistema está en mantenimiento. Vuelve pronto."
+    readonly: bool = False
+
+
+class GeneralConfigWrite(BaseModel):
+    platform_name: str = "Worsyn"
+    support_email: str = ""
+    timezone: str = "UTC"
+    maintenance_mode: bool = False
+    maintenance_message: str = ""
 
 
 class HealthResponse(BaseModel):

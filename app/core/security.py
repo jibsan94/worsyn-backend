@@ -1,6 +1,10 @@
+import base64
+import io
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import pyotp
+import qrcode
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
@@ -33,8 +37,36 @@ def create_refresh_token(subject: str | Any) -> str:
     return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
 
 
+def create_partial_token(subject: str | Any) -> str:
+    """Short-lived token (5 min) used while awaiting TOTP verification during login."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=5)
+    payload = {"sub": str(subject), "exp": expire, "type": "2fa_pending"}
+    return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+
+
 def decode_token(token: str) -> dict:
     try:
         return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
     except JWTError:
         return {}
+
+
+# ── TOTP utilities ────────────────────────────────────────────────────────────
+
+def generate_totp_secret() -> str:
+    return pyotp.random_base32()
+
+
+def get_totp_uri(secret: str, email: str, issuer: str = "Worsyn Admin") -> str:
+    return pyotp.TOTP(secret).provisioning_uri(name=email, issuer_name=issuer)
+
+
+def verify_totp(secret: str, code: str) -> bool:
+    return pyotp.TOTP(secret).verify(code.strip(), valid_window=1)
+
+
+def generate_qr_base64(uri: str) -> str:
+    img = qrcode.make(uri)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()

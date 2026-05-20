@@ -1,24 +1,37 @@
-"""Authentication endpoints — login, me, change password/username."""
+"""Authentication endpoints — login, me, change-credentials, 2FA setup/complete."""
 from datetime import datetime, timezone
 
+import redis as redis_lib
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.security import (
     create_access_token,
+    create_partial_token,
     create_refresh_token,
     decode_token,
+    generate_qr_base64,
+    generate_totp_secret,
+    get_totp_uri,
     hash_password,
     verify_password,
+    verify_totp,
 )
 from app.db.session import get_db
 from app.models.models import AdminUser
 
+settings = get_settings()
+
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+
+
+def _redis() -> redis_lib.Redis:
+    return redis_lib.from_url(settings.redis_url, decode_responses=True)
 
 
 async def get_current_user(
@@ -45,12 +58,18 @@ def require_role(*roles: str):
     return checker
 
 
+# ── Login ─────────────────────────────────────────────────────────────────────
+
 @router.post("/login")
 async def login(
     form: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ):
-    """Authenticate with username + password. Returns JWT tokens."""
+    """Authenticate with username + password.
+
+    If user has 2FA enabled, returns {requires_2fa: true, partial_token} instead of full tokens.
+    Client must then call POST /auth/2fa/complete with the TOTP code.
+    """
     result = await db.execute(
         select(AdminUser).where(AdminUser.username == form.username)
     )
@@ -60,10 +79,20 @@ async def login(
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
 
-    user.last_login_at = datetime.now(timezone.utc)
-    await db.flush()
+    if user.two_factor_enabled and user.two_factor_secret:
+        return {
+            "requires_2fa": True,
+            "partial_token": create_partial_token(str(user.id)),
+            "access_token": None,
+            "refresh_token": None,
+            "token_type": "bearer",
+            "must_change_password": user.must_change_password,
+            "role": user.role,
+        }
 
+    user.last_login_at = datetime.now(timezone.utc)
     return {
+        "requires_2fa": False,
         "access_token": create_access_token(str(user.id)),
         "refresh_token": create_refresh_token(str(user.id)),
         "token_type": "bearer",
@@ -71,6 +100,44 @@ async def login(
         "role": user.role,
     }
 
+
+@router.post("/2fa/complete")
+async def complete_2fa_login(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Second step of login when user has 2FA enabled.
+
+    Body: { "partial_token": str, "totp_code": str }
+    Returns full JWT tokens on success.
+    """
+    partial_token = payload.get("partial_token", "")
+    totp_code = payload.get("totp_code", "")
+
+    data = decode_token(partial_token)
+    if not data.get("sub") or data.get("type") != "2fa_pending":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado")
+
+    result = await db.execute(select(AdminUser).where(AdminUser.id == data["sub"]))
+    user = result.scalar_one_or_none()
+    if not user or not user.is_active or not user.two_factor_enabled or not user.two_factor_secret:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Estado de autenticación inválido")
+
+    if not verify_totp(user.two_factor_secret, totp_code):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Código 2FA incorrecto")
+
+    user.last_login_at = datetime.now(timezone.utc)
+    return {
+        "requires_2fa": False,
+        "access_token": create_access_token(str(user.id)),
+        "refresh_token": create_refresh_token(str(user.id)),
+        "token_type": "bearer",
+        "must_change_password": user.must_change_password,
+        "role": user.role,
+    }
+
+
+# ── Me ────────────────────────────────────────────────────────────────────────
 
 @router.get("/me")
 async def get_me(user: AdminUser = Depends(get_current_user)):
@@ -83,10 +150,14 @@ async def get_me(user: AdminUser = Depends(get_current_user)):
         "role": user.role,
         "is_active": user.is_active,
         "must_change_password": user.must_change_password,
+        "two_factor_enabled": user.two_factor_enabled,
+        "avatar": user.avatar,
         "created_at": user.created_at.isoformat(),
         "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
     }
 
+
+# ── Change credentials ────────────────────────────────────────────────────────
 
 @router.post("/change-credentials")
 async def change_credentials(
@@ -122,6 +193,82 @@ async def change_credentials(
         user.hashed_password = hash_password(new_password)
 
     user.must_change_password = False
-    await db.flush()
-
     return {"status": "ok", "username": user.username}
+
+
+# ── 2FA Management (own account) ──────────────────────────────────────────────
+
+@router.get("/2fa/setup")
+async def setup_2fa(user: AdminUser = Depends(get_current_user)):
+    """Generate a TOTP secret for the current user and return QR code.
+
+    The secret is stored in Redis for 5 minutes pending verification via POST /auth/2fa/enable.
+    """
+    secret = generate_totp_secret()
+    uri = get_totp_uri(secret, user.email)
+    qr_b64 = generate_qr_base64(uri)
+
+    r = _redis()
+    r.setex(f"2fa_setup:{user.id}", 300, secret)
+
+    return {
+        "secret": secret,
+        "qr_code": qr_b64,
+        "uri": uri,
+    }
+
+
+@router.post("/2fa/enable")
+async def enable_2fa(
+    payload: dict,
+    user: AdminUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify TOTP code from authenticator app and enable 2FA.
+
+    Body: { "totp_code": str }
+    Must be called after GET /auth/2fa/setup while the Redis session is alive.
+    """
+    totp_code = payload.get("totp_code", "")
+
+    r = _redis()
+    secret = r.get(f"2fa_setup:{user.id}")
+    if not secret:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sesión expirada. Inicia el proceso de configuración de nuevo.",
+        )
+
+    if not verify_totp(secret, totp_code):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Código incorrecto. Verifica que el código de la app sea correcto e inténtalo de nuevo.",
+        )
+
+    user.two_factor_secret = secret
+    user.two_factor_enabled = True
+    r.delete(f"2fa_setup:{user.id}")
+    return {"status": "enabled"}
+
+
+@router.post("/2fa/disable")
+async def disable_2fa(
+    payload: dict,
+    user: AdminUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Disable 2FA for the current user. Requires current TOTP code to confirm.
+
+    Body: { "totp_code": str }
+    """
+    totp_code = payload.get("totp_code", "")
+
+    if not user.two_factor_enabled or not user.two_factor_secret:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El 2FA no está activado.")
+
+    if not verify_totp(user.two_factor_secret, totp_code):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Código incorrecto.")
+
+    user.two_factor_secret = None
+    user.two_factor_enabled = False
+    return {"status": "disabled"}

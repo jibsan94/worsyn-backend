@@ -164,11 +164,18 @@ Cuando `must_change_password: true`:
 - [x] Vista detalle de miembro en `/users/:id` — editable para admin/owner
 - [x] Rol de OrgMember: `admin`, `leader`, `member` — gestionables desde Configuración
 - [x] Tabla `org_roles`: define roles disponibles para org members, con CRUD en `/settings/roles`
-- [x] Configuración de Seguridad: políticas de contraseñas, sesiones, política 2FA global — `GET/POST /api/v1/admin/settings/security`, persiste en `system_settings` con keys `security.*`
+- [x] Configuración General: nombre plataforma, correo soporte, zona horaria, modo mantenimiento — `GET/POST /api/v1/admin/settings/general`, keys `general.*`
+- [x] Configuración de Seguridad: políticas de contraseñas, sesiones, política 2FA global — `GET/POST /api/v1/admin/settings/security`, keys `security.*`
+- [x] SSO / Active Directory: configuración scaffolding en Seguridad — keys `security.sso_*`, sin integración LDAP activa aún
 - [x] Campo `two_factor_enabled` en `system_users` — cada usuario gestiona su propio 2FA
 - [x] Vista detalle de usuario del sistema (`/system-users/:id`) — editar campos, restablecer contraseña, toggle/reset 2FA
 - [x] Owner puede desactivar el 2FA de otro usuario (`DELETE /api/v1/admin/users/{id}/2fa`)
 - [x] Filas de SystemUsers clickeables → navegan a detalle del usuario
+- [x] 2FA TOTP completo: `GET /auth/2fa/setup` (QR base64) → `POST /auth/2fa/enable` → `POST /auth/2fa/disable`
+- [x] Login con 2FA: flujo dos pasos — partial_token (5 min, type "2fa_pending") → `POST /auth/2fa/complete` → tokens completos
+- [x] Perfil: sección 2FA con QR, código manual, activar/desactivar con confirmación TOTP
+- [x] SystemUserDetail: propia sección → link a Mi Perfil (no toggle simple)
+- [x] AuthUser en contexto incluye `two_factor_enabled: boolean`
 
 ## Roles de OrgMember
 

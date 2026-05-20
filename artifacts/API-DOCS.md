@@ -59,9 +59,10 @@ Authenticate with username and password. Returns JWT tokens.
 | `username` | string | ✅       |
 | `password` | string | ✅       |
 
-**Response 200**
+**Response 200 — no 2FA**
 ```json
 {
+  "requires_2fa": false,
   "access_token": "eyJ...",
   "refresh_token": "eyJ...",
   "token_type": "bearer",
@@ -70,7 +71,20 @@ Authenticate with username and password. Returns JWT tokens.
 }
 ```
 
-> If `must_change_password` is `true`, the frontend shows a red banner: *"Debes cambiar tu contraseña. Ve a Perfil › Seguridad."*
+**Response 200 — user has 2FA enabled**
+```json
+{
+  "requires_2fa": true,
+  "partial_token": "eyJ...",
+  "access_token": null,
+  "refresh_token": null,
+  "token_type": "bearer",
+  "must_change_password": false,
+  "role": "owner"
+}
+```
+
+> If `requires_2fa: true`, the frontend must call `POST /auth/2fa/complete` with the `partial_token` and a TOTP code to obtain full tokens.
 
 **Errors**
 
@@ -78,6 +92,104 @@ Authenticate with username and password. Returns JWT tokens.
 |------|--------|
 | 401  | Invalid credentials |
 | 403  | Account disabled |
+
+---
+
+### POST /auth/2fa/complete
+Complete login for users who have 2FA enabled. Called after `POST /auth/login` returns `requires_2fa: true`.
+
+**Auth required:** No
+
+**Request body**
+```json
+{
+  "partial_token": "eyJ...",
+  "totp_code": "123456"
+}
+```
+
+**Response 200**
+```json
+{
+  "requires_2fa": false,
+  "access_token": "eyJ...",
+  "refresh_token": "eyJ...",
+  "token_type": "bearer",
+  "must_change_password": false,
+  "role": "owner"
+}
+```
+
+**Errors**
+
+| Code | Detail |
+|------|--------|
+| 401  | Token inválido o expirado |
+| 400  | Código 2FA incorrecto |
+
+---
+
+### GET /auth/2fa/setup
+Generate a new TOTP secret for the authenticated user. Returns a QR code (base64 PNG) to scan with an authenticator app. The secret is stored in Redis for 5 minutes pending verification via `POST /auth/2fa/enable`.
+
+**Auth required:** Yes (any role)
+
+**Response 200**
+```json
+{
+  "secret": "BASE32SECRET",
+  "qr_code": "<base64 PNG string>",
+  "uri": "otpauth://totp/Worsyn%20Admin:user@example.com?secret=...&issuer=Worsyn%20Admin"
+}
+```
+
+---
+
+### POST /auth/2fa/enable
+Verify a TOTP code against the pending setup secret in Redis and persist 2FA to the user account. Must be called while the Redis session from `GET /auth/2fa/setup` is still alive.
+
+**Auth required:** Yes (any role)
+
+**Request body**
+```json
+{ "totp_code": "123456" }
+```
+
+**Response 200**
+```json
+{ "status": "enabled" }
+```
+
+**Errors**
+
+| Code | Detail |
+|------|--------|
+| 400  | Sesión expirada (Redis TTL elapsed) |
+| 400  | Código incorrecto |
+
+---
+
+### POST /auth/2fa/disable
+Disable 2FA for the current user. Requires current TOTP code as confirmation.
+
+**Auth required:** Yes (any role)
+
+**Request body**
+```json
+{ "totp_code": "123456" }
+```
+
+**Response 200**
+```json
+{ "status": "disabled" }
+```
+
+**Errors**
+
+| Code | Detail |
+|------|--------|
+| 400  | 2FA no está activado |
+| 400  | Código incorrecto |
 
 ---
 
@@ -798,6 +910,8 @@ Return the currently authenticated user.
   "role": "owner",
   "is_active": true,
   "must_change_password": false,
+  "two_factor_enabled": false,
+  "avatar": null,
   "created_at": "2026-05-11T13:16:03.583827+00:00",
   "last_login_at": "2026-05-11T13:16:11.246295+00:00"
 }
@@ -1073,6 +1187,45 @@ Test a database connection without saving the configuration.
   "latency_ms": 12
 }
 ```
+
+---
+
+### GET /admin/settings/general
+Return general platform config.
+
+**Auth required:** Yes — `admin` or `owner` (read) · `owner` only (write)
+
+**Response 200**
+```json
+{
+  "platform_name": "Worsyn",
+  "support_email": "soporte@worsyn.com",
+  "timezone": "Europe/Madrid",
+  "maintenance_mode": false,
+  "maintenance_message": "El sistema está en mantenimiento. Vuelve pronto.",
+  "readonly": false
+}
+```
+
+---
+
+### POST /admin/settings/general
+Persist general config. Owner only. Keys stored under `general.*` in `system_settings`.
+
+**Auth required:** Yes — `owner`
+
+**Request body**
+```json
+{
+  "platform_name": "Worsyn",
+  "support_email": "soporte@worsyn.com",
+  "timezone": "Europe/Madrid",
+  "maintenance_mode": false,
+  "maintenance_message": "El sistema está en mantenimiento."
+}
+```
+
+**Response 200** `{ "status": "saved" }`
 
 ---
 
@@ -1370,4 +1523,4 @@ Remove a member from an organization.
 
 ---
 
-*Last updated: 2026-05-19 — endpoints: health, auth, organizations (CRUD), org_members (CRUD), org_roles (CRUD), admin/users (CRUD + avatar + 2FA toggle/reset), admin/settings/database, admin/settings/security*
+*Last updated: 2026-05-20 — endpoints: health, auth (incl. TOTP 2FA), organizations (CRUD), org_members (CRUD), org_roles (CRUD), admin/users (CRUD + avatar + 2FA reset), admin/settings/database, admin/settings/general, admin/settings/security (incl. SSO scaffold)*
