@@ -22,6 +22,7 @@ from app.core.security import (
 )
 from app.db.session import get_db
 from app.models.models import AdminUser
+from app.services.audit import log_action
 
 settings = get_settings()
 
@@ -91,6 +92,7 @@ async def login(
         }
 
     user.last_login_at = datetime.now(timezone.utc)
+    await log_action(db, user, "auth.login", "session", resource_name=user.username)
     return {
         "requires_2fa": False,
         "access_token": create_access_token(str(user.id)),
@@ -127,6 +129,7 @@ async def complete_2fa_login(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Código 2FA incorrecto")
 
     user.last_login_at = datetime.now(timezone.utc)
+    await log_action(db, user, "auth.2fa.complete", "session", resource_name=user.username)
     return {
         "requires_2fa": False,
         "access_token": create_access_token(str(user.id)),
@@ -179,20 +182,25 @@ async def change_credentials(
     if not new_username and not new_password:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Provide new_username or new_password")
 
+    changed: list[str] = []
     if new_username:
         if len(new_username) < 3:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username must be at least 3 characters")
         existing = await db.execute(select(AdminUser).where(AdminUser.username == new_username))
         if existing.scalar_one_or_none() and new_username != user.username:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already taken")
+        changed.append("username")
         user.username = new_username
 
     if new_password:
         if len(new_password) < 8:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be at least 8 characters")
+        changed.append("password")
         user.hashed_password = hash_password(new_password)
 
     user.must_change_password = False
+    await log_action(db, user, "auth.credentials.change", "user",
+                     str(user.id), user.username, {"changed": changed})
     return {"status": "ok", "username": user.username}
 
 
@@ -248,6 +256,7 @@ async def enable_2fa(
     user.two_factor_secret = secret
     user.two_factor_enabled = True
     r.delete(f"2fa_setup:{user.id}")
+    await log_action(db, user, "auth.2fa.enable", "user", str(user.id), user.username)
     return {"status": "enabled"}
 
 
@@ -271,4 +280,5 @@ async def disable_2fa(
 
     user.two_factor_secret = None
     user.two_factor_enabled = False
+    await log_action(db, user, "auth.2fa.disable", "user", str(user.id), user.username)
     return {"status": "disabled"}

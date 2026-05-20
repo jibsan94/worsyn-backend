@@ -1495,6 +1495,39 @@ Remove a member from an organization.
 
 ---
 
+## Audit Logs
+
+### GET /admin/logs
+Return audit logs in reverse chronological order.
+
+**Auth required:** owner
+
+**Query params:** `page` (0-based, default 0), `limit` (1-200, default 50), `action` (exact match), `resource_type` (exact match), `actor_username` (ilike)
+
+**Response 200** — `list[AuditLogRead]`
+```json
+[{
+  "id": "uuid",
+  "actor_id": "uuid | null",
+  "actor_username": "string",
+  "action": "auth.login | user.create | org.delete | tenant.start | ...",
+  "resource_type": "session | user | org | tenant | settings",
+  "resource_id": "string | null",
+  "resource_name": "string | null",
+  "details": "JSON string | null",
+  "created_at": "ISO 8601"
+}]
+```
+
+### GET /admin/logs/count
+Return total audit log count.
+
+**Auth required:** owner
+
+**Response 200** `{"total": 1234}`
+
+---
+
 ## Data models
 
 ### AdminUserRead
@@ -1523,4 +1556,4 @@ Remove a member from an organization.
 
 ---
 
-*Last updated: 2026-05-20 — endpoints: health, auth (incl. TOTP 2FA), organizations (CRUD), org_members (CRUD), org_roles (CRUD), admin/users (CRUD + avatar + 2FA reset), admin/settings/database, admin/settings/general, admin/settings/security (incl. SSO scaffold)*
+*Last updated: 2026-05-20 — endpoints: health, auth (incl. TOTP 2FA), organizations (CRUD), org_members (CRUD), org_roles (CRUD), admin/users (CRUD + avatar + 2FA reset), admin/settings/database, admin/settings/general, admin/settings/security (incl. SSO scaffold), admin/logs (audit trail)*

@@ -311,6 +311,20 @@ class GeneralConfigWrite(BaseModel):
     maintenance_message: str = ""
 
 
+class AuditLogRead(BaseModel):
+    id: uuid.UUID
+    actor_id: uuid.UUID | None
+    actor_username: str
+    action: str
+    resource_type: str
+    resource_id: str | None
+    resource_name: str | None
+    details: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class HealthResponse(BaseModel):
     status: str
     version: str

@@ -54,7 +54,7 @@ Principal
   Dashboard · Organizaciones · Usuarios · Facturación
 ```
 
-**Rol `admin` y `owner`:**
+**Rol `admin`:**
 ```
 Principal
   Dashboard · Organizaciones · Usuarios · Facturación
@@ -62,6 +62,13 @@ Principal
 
 Sistema
   Configuración → Base de datos / General / Seguridad / Correo SMTP / Integraciones
+```
+
+**Rol `owner`** (todo lo de admin más):
+```
+Principal
+  ...
+  Logs del Sistema   ← owner only
 ```
 
 ### Regla crítica de protección de owners
@@ -176,6 +183,9 @@ Cuando `must_change_password: true`:
 - [x] Perfil: sección 2FA con QR, código manual, activar/desactivar con confirmación TOTP
 - [x] SystemUserDetail: propia sección → link a Mi Perfil (no toggle simple)
 - [x] AuthUser en contexto incluye `two_factor_enabled: boolean`
+- [x] Logs del sistema: `AuditLog` model + `app/services/audit.py` + `GET/GET-count /admin/logs` (owner only)
+- [x] Audit logging integrado en: login, 2FA, change-credentials, user CRUD, org CRUD, tenant lifecycle, settings save
+- [x] Frontend: `/logs` (owner only) con tabla, filtros por acción/recurso/actor, paginación, tags de color
 
 ## Roles de OrgMember
 
@@ -197,7 +207,15 @@ Ruta pública (sin autenticación de admin) accesible desde el botón "Ver porta
 1. La URL `/portal/{slug}` carga el componente `TenantPortal`
 2. Hace `GET /api/v1/organizations/slug/{slug}` (endpoint público, sin auth) → obtiene nombre y alias
 3. Muestra formulario de login con email + contraseña
-4. Al "iniciar sesión" (simulado), transiciona a un dashboard de muestra con KPIs y paneles placeholder
+4. Al "iniciar sesión" (simulado), entra al app shell con navegación completa
+
+**App shell del tenant:**
+- Top bar con logo W + module switcher dropdown (Planning Center-style) + user avatar
+- Módulos: Principal, Servicios, Personas, Equipos, Partituras, Eventos, Ensayos, Calendario, Finanzas
+- Opciones de la cuenta al pie del dropdown
+- Vista por defecto: Personas — sidebar con filtros (Todas/Por ministerio/Nuevos) + tabla de personas con avatar, ministerio, rol, contacto, estado
+- Resto de módulos: placeholder "Próximamente"
+- Todo inline styles (sin contaminar CSS del panel admin)
 
 **Flujo futuro (pendiente de implementar):**
 1. El miembro entra a `/portal/{slug}` o `/portal/{alias}`

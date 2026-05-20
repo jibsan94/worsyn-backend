@@ -20,6 +20,7 @@ from app.core.security import hash_password
 from app.db.session import get_db
 from app.models.models import AdminUser
 from app.schemas.schemas import AdminUserAvatarUpdate, AdminUserCreate, AdminUserRead, AdminUserUpdate
+from app.services.audit import log_action
 
 router = APIRouter(prefix="/admin/users", tags=["Admin User Management"])
 
@@ -94,6 +95,8 @@ async def create_admin_user(
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
+    await log_action(db, actor, "user.create", "user", str(new_user.id), new_user.username,
+                     {"role": new_user.role, "email": new_user.email})
     return new_user
 
 
@@ -164,6 +167,9 @@ async def update_admin_user(
             )
         target.two_factor_enabled = payload.two_factor_enabled
 
+    await log_action(db, actor, "user.update", "user", str(target.id), target.username,
+                     {k: v for k, v in payload.model_dump(exclude_none=True).items()
+                      if k not in ("password", "hashed_password")})
     await db.commit()
     await db.refresh(target)
     return target
@@ -202,6 +208,7 @@ async def reset_2fa(
     """Reset (disable) 2FA for a user. Owner only."""
     target = await _get_or_404(db, user_id)
     target.two_factor_enabled = False
+    await log_action(db, actor, "user.2fa.reset", "user", str(target.id), target.username)
     await db.commit()
 
 
@@ -241,5 +248,7 @@ async def delete_admin_user(
             detail="Cannot delete your own account",
         )
 
+    await log_action(db, actor, "user.delete", "user", str(target.id), target.username,
+                     {"role": target.role, "email": target.email})
     await db.delete(target)
     await db.commit()

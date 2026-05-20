@@ -11,6 +11,7 @@ from app.models.models import AdminUser, Organization, OrgMember, Tenant
 from app.schemas.schemas import (
     OrganizationCreate, OrganizationRead, OrganizationUpdate, TenantRead,
 )
+from app.services.audit import log_action
 from app.services.tenant_provisioner import (
     allocate_port, check_container_status, destroy_tenant,
     generate_db_password, provision_tenant, start_tenant, stop_tenant,
@@ -118,6 +119,8 @@ async def create_organization(
     db.add(tenant)
     await db.flush()
 
+    await log_action(db, user, "org.create", "org", str(org.id), org.name,
+                     {"slug": org.slug, "plan": org.plan})
     background_tasks.add_task(provision_tenant, str(org.id), org.slug, port, password)
 
     d = OrganizationRead.model_validate(org).model_dump()
@@ -137,6 +140,8 @@ async def update_organization(
         setattr(org, field, value)
     await db.flush()
     await db.refresh(org)
+    await log_action(db, user, "org.update", "org", str(org.id), org.name,
+                     payload.model_dump(exclude_none=True))
     orgs = await _with_member_count(db, [org])
     return orgs[0]
 
@@ -148,10 +153,13 @@ async def delete_organization(
     user: AdminUser = Depends(require_role("owner")),
 ):
     org = await _get_org_or_404(db, org_id)
+    org_name, org_slug = org.name, org.slug
     tenant_q = await db.execute(select(Tenant).where(Tenant.org_id == org_id))
     tenant = tenant_q.scalar_one_or_none()
     if tenant and tenant.status in ("running", "stopped"):
         destroy_tenant(org.slug)
+    await log_action(db, user, "org.delete", "org", str(org_id), org_name,
+                     {"slug": org_slug})
     await db.delete(org)
 
 
@@ -177,6 +185,8 @@ async def start_org_tenant(
     if err:
         tenant.error_msg = err
     await db.flush()
+    await log_action(db, user, "tenant.start", "tenant", str(org_id), org.name,
+                     {"slug": org.slug, "ok": ok})
     return tenant
 
 
@@ -193,6 +203,8 @@ async def stop_org_tenant(
     if err:
         tenant.error_msg = err
     await db.flush()
+    await log_action(db, user, "tenant.stop", "tenant", str(org_id), org.name,
+                     {"slug": org.slug, "ok": ok})
     return tenant
 
 
@@ -232,6 +244,8 @@ async def destroy_org_tenant(
     tenant.status = "stopped"
     tenant.provisioned_at = None
     await db.flush()
+    await log_action(db, user, "tenant.destroy", "tenant", str(org_id), org.name,
+                     {"slug": org.slug})
 
 
 @router.post("/{org_id}/tenant/provision", response_model=TenantRead)
@@ -260,6 +274,8 @@ async def provision_org_tenant(
     tenant.error_msg = None
     await db.flush()
 
+    await log_action(db, user, "tenant.provision", "tenant", str(org_id), org.name,
+                     {"slug": org.slug})
     background_tasks.add_task(provision_tenant, str(org.id), org.slug, port, password)
     return tenant
 

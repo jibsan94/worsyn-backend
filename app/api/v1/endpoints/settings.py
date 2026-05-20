@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.v1.endpoints.auth import get_current_user, require_role
 from app.db.session import get_db
 from app.models.models import AdminUser, SystemSetting
+from app.services.audit import log_action
 from app.schemas.schemas import (
     DatabaseConfigWrite,
     GeneralConfigRead,
@@ -165,6 +166,8 @@ async def save_general_config(
         "general.maintenance_mode": str(payload.maintenance_mode).lower(),
         "general.maintenance_message": payload.maintenance_message,
     }, db)
+    await log_action(db, user, "settings.general.save", "settings", None, "general",
+                     {"maintenance_mode": payload.maintenance_mode, "timezone": payload.timezone})
     return {"status": "saved"}
 
 
@@ -229,4 +232,6 @@ async def save_security_config(
         updates["security.sso_ad_bind_password"] = payload.sso_ad_bind_password
 
     await _upsert_settings(updates, db)
+    await log_action(db, user, "settings.security.save", "settings", None, "security",
+                     {"require_2fa": payload.require_2fa, "sso_enabled": payload.sso_enabled})
     return {"status": "saved"}
