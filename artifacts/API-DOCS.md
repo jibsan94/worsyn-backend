@@ -705,77 +705,79 @@ Delete a custom role. Fails if `is_system=true` or if any members have this role
 
 ## Org Members
 
-All org member endpoints are nested under `/organizations/{org_id}/members`.  
-Email is unique **within** an organization, not globally.
+### Schema — OrgMemberRead
 
-### GET /organizations/{org_id}/members
-List all members of an organization.
-
-**Auth required:** any role
-
-**Response 200**
-```json
-[
-  {
-    "id": "uuid",
-    "org_id": "uuid",
-    "email": "pastor@church.com",
-    "full_name": "John Pastor",
-    "role": "owner",
-    "is_active": true,
-    "created_at": "2026-05-11T00:00:00+00:00"
-  }
-]
-```
-
----
-
-### POST /organizations/{org_id}/members
-Create a new org member.
-
-**Auth required:** admin, owner
-
-**Request body**
 ```json
 {
-  "email": "member@church.com",
-  "full_name": "Jane Member",
-  "role": "member"
+  "id": "uuid",
+  "org_id": "uuid",
+  "email": "pastor@church.com",
+  "full_name": "Juan Pastor",
+  "phone": "+34 600 000 000",
+  "role": "member",
+  "is_active": true,
+  "joined_at": "2026-05-20T00:00:00+00:00",
+  "updated_at": "2026-05-20T00:00:00+00:00",
+  "prefix": "Rvdo.",
+  "gender": "M",
+  "birthdate": "1980-05-15",
+  "anniversary": "2005-06-20",
+  "ministry": "Alabanza",
+  "org_roles": ["Predicador", "Pastor o Anciano"]
 }
 ```
 
-**Response 201** — `OrgMemberRead`
+`password` is optional on create. Stored as null until portal login is implemented.
+
+---
+
+### Admin panel endpoints (require AdminUser JWT)
+
+Nested under `/organizations/{org_id}/members`:
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/organizations/{org_id}/members` | any | List members |
+| POST   | `/organizations/{org_id}/members` | admin, owner | Create member |
+| GET    | `/organizations/{org_id}/members/{id}` | any | Get member |
+| PUT    | `/organizations/{org_id}/members/{id}` | admin, owner | Update member |
+| DELETE | `/organizations/{org_id}/members/{id}` | admin, owner | Delete member |
+
+---
+
+### Tenant portal endpoints (no auth — tenant auth pending)
+
+Nested under `/tenant/{slug}/members`:
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/tenant/{slug}/members` | none | List org members |
+| POST   | `/tenant/{slug}/members` | none | Create member |
+| PUT    | `/tenant/{slug}/members/{id}` | none | Update member |
+| DELETE | `/tenant/{slug}/members/{id}` | none | Delete member |
+
+**POST /tenant/{slug}/members — Request body**
+```json
+{
+  "email": "miembro@iglesia.com",
+  "full_name": "María García",
+  "phone": "+34 612 345 678",
+  "prefix": "Sra.",
+  "gender": "F",
+  "birthdate": "1990-03-10",
+  "anniversary": null,
+  "ministry": "Alabanza",
+  "org_roles": ["Vocalista", "Líder de Adoración"],
+  "role": "member"
+}
+```
 
 **Errors**
 
 | Code | Detail |
 |------|--------|
-| 404  | Organization not found |
-| 409  | Email already registered in this organization |
-
----
-
-### GET /organizations/{org_id}/members/{member_id}
-Get a single org member.
-
-**Auth required:** any role  
-**Response 200** — `OrgMemberRead`
-
----
-
-### PUT /organizations/{org_id}/members/{member_id}
-Update an org member.
-
-**Auth required:** admin, owner  
-**Response 200** — `OrgMemberRead`
-
----
-
-### DELETE /organizations/{org_id}/members/{member_id}
-Delete an org member.
-
-**Auth required:** admin, owner  
-**Response 204** — No content
+| 404  | Org slug not found |
+| 409  | Email already exists in this org |
 
 ---
 

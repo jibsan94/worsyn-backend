@@ -86,7 +86,13 @@ async def create_member(
         full_name=payload.full_name,
         phone=payload.phone,
         role=payload.role,
-        hashed_password=hash_password(payload.password),
+        hashed_password=hash_password(payload.password) if payload.password else None,
+        prefix=payload.prefix,
+        gender=payload.gender,
+        birthdate=payload.birthdate,
+        anniversary=payload.anniversary,
+        ministry=payload.ministry,
+        org_roles=payload.org_roles,
     )
     db.add(member)
     await db.flush()
@@ -135,6 +141,18 @@ async def update_member(
         member.is_active = payload.is_active
     if payload.password is not None:
         member.hashed_password = hash_password(payload.password)
+    if payload.prefix is not None:
+        member.prefix = payload.prefix
+    if payload.gender is not None:
+        member.gender = payload.gender
+    if payload.birthdate is not None:
+        member.birthdate = payload.birthdate
+    if payload.anniversary is not None:
+        member.anniversary = payload.anniversary
+    if payload.ministry is not None:
+        member.ministry = payload.ministry
+    if payload.org_roles is not None:
+        member.org_roles = payload.org_roles
 
     await db.flush()
     await db.refresh(member)

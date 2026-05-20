@@ -19,18 +19,19 @@
 - **Artefactos / docs:** `/mnt/worsyn-backend/artifacts/`
 - **Tenants:** `/mnt/tenants/{slug}/` (docker-compose.yml + data/)
 
-### Levantar el sistema completo
+### Levantar el sistema completo (un solo comando)
 ```bash
-# 1. Backend (DB + Redis + API) — desde /mnt/worsyn-backend
-cd /mnt/worsyn-backend && docker compose up -d
-
-# 2. Frontend — ya corre como contenedor permanente (worsyn-dashboard)
-#    Si está caído: docker start worsyn-dashboard
-
-# Verificar todo
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-curl http://localhost:8000/api/v1/health
+cd /mnt/worsyn-backend && docker compose up -d && docker start worsyn-dashboard 2>/dev/null; docker network connect worsyn-backend_worsyn worsyn-dashboard 2>/dev/null; docker exec worsyn-dashboard nginx -s reload 2>/dev/null; docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 ```
+
+**Qué hace:**
+1. Levanta DB + Redis + backend (docker compose)
+2. Arranca nginx si estaba caído
+3. Conecta nginx a la red del backend (idempotente)
+4. Recarga nginx (para que resuelva `worsyn-backend`)
+5. Muestra estado de todos los contenedores
+
+> La IP del servidor puede cambiar (NAT/bridged). El proxy nginx usa el nombre de contenedor `worsyn-backend` en la red Docker interna — la IP del host no importa.
 
 ### Deploy del frontend (sin rebuild desde Docker Hub)
 ```bash
@@ -43,7 +44,9 @@ docker cp /mnt/worsyn-dashboard/dist/. worsyn-dashboard:/usr/share/nginx/html/
 > Docker Hub no tiene acceso a internet desde este servidor. Los builds usan el contenedor node:20-alpine local.
 
 ### Proxy nginx
-El contenedor nginx (`worsyn-dashboard`) proxea `/api/` → `http://10.211.55.11:8000/api/`.
+El contenedor nginx (`worsyn-dashboard`) proxea `/api/` → `http://worsyn-backend:8000/api/` (nombre de contenedor Docker, no IP).  
+Usa `resolver 127.0.0.11 valid=30s` para resolución DNS en tiempo de petición (no al inicio).  
+Ambos contenedores deben estar en la red `worsyn-backend_worsyn`.  
 El archivo fuente es `/mnt/worsyn-dashboard/nginx.conf`.
 
 ---
@@ -127,7 +130,9 @@ tenants          — tenant Docker por organización (one-to-one con organizatio
   compose_dir, provisioned_at, error_msg, updated_at
 
 org_members      — usuarios de cada iglesia (no tienen acceso al panel)
-  id, org_id, email, full_name, role, is_active, created_at
+  id, org_id, email, hashed_password (nullable), full_name, phone, role, is_active,
+  joined_at, updated_at,
+  prefix, gender, birthdate, anniversary, ministry, org_roles (JSONB [])
 
 system_users     — operadores del panel Worsyn (antes: admin_users)
   id, username, email, hashed_password, full_name, role,

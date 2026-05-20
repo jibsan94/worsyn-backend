@@ -1,7 +1,7 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -54,13 +54,20 @@ class OrgMember(Base):
         index=True,
     )
     email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    full_name: Mapped[str] = mapped_column(String(255), nullable=True)
+    hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    role: Mapped[str] = mapped_column(String(50), default="member")  # owner | admin | member | viewer
+    role: Mapped[str] = mapped_column(String(50), default="member")  # admin | leader | member
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    # Extended profile fields
+    prefix: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    gender: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    birthdate: Mapped[date | None] = mapped_column(Date, nullable=True)
+    anniversary: Mapped[date | None] = mapped_column(Date, nullable=True)
+    ministry: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    org_roles: Mapped[list] = mapped_column(JSON, default=list)
 
     organization: Mapped["Organization"] = relationship("Organization", back_populates="members")
 

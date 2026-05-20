@@ -1,6 +1,6 @@
 from typing import Literal
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, field_validator
 
@@ -74,6 +74,13 @@ class OrgMemberBase(BaseModel):
     full_name: str | None = None
     phone: str | None = None
     role: OrgMemberRole = "member"
+    # Extended profile
+    prefix: str | None = None
+    gender: str | None = None
+    birthdate: date | None = None
+    anniversary: date | None = None
+    ministry: str | None = None
+    org_roles: list[str] = []
 
     @field_validator("email")
     @classmethod
@@ -84,12 +91,12 @@ class OrgMemberBase(BaseModel):
 
 
 class OrgMemberCreate(OrgMemberBase):
-    password: str
+    password: str | None = None        # optional — no password until portal auth is wired up
 
     @field_validator("password")
     @classmethod
-    def password_min_length(cls, v: str) -> str:
-        if len(v) < 8:
+    def password_min_length(cls, v: str | None) -> str | None:
+        if v is not None and len(v) < 8:
             raise ValueError("Password must be at least 8 characters")
         return v
 
@@ -101,6 +108,12 @@ class OrgMemberUpdate(BaseModel):
     role: OrgMemberRole | None = None
     is_active: bool | None = None
     password: str | None = None
+    prefix: str | None = None
+    gender: str | None = None
+    birthdate: date | None = None
+    anniversary: date | None = None
+    ministry: str | None = None
+    org_roles: list[str] | None = None
 
     @field_validator("password")
     @classmethod
