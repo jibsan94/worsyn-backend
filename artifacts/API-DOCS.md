@@ -745,9 +745,7 @@ Nested under `/organizations/{org_id}/members`:
 
 ---
 
-### Tenant portal endpoints (no auth — tenant auth pending)
-
-Nested under `/tenant/{slug}/members`:
+### Tenant portal endpoints
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
@@ -755,6 +753,30 @@ Nested under `/tenant/{slug}/members`:
 | POST   | `/tenant/{slug}/members` | none | Create member |
 | PUT    | `/tenant/{slug}/members/{id}` | none | Update member |
 | DELETE | `/tenant/{slug}/members/{id}` | none | Delete member |
+| POST   | `/tenant/{slug}/auth/login` | none | Login → 7-day tenant JWT |
+| GET    | `/tenant/{slug}/auth/me` | tenant JWT | Validate session / get member info |
+| GET    | `/tenant/{slug}/settings` | none | Get org settings (incl. ministries, roles, icon) |
+| PATCH  | `/tenant/{slug}/settings` | tenant JWT (admin role) | Update org settings |
+
+**PATCH /tenant/{slug}/settings — Request body (all fields optional)**
+```json
+{
+  "name": "Mi Iglesia",
+  "alias": "mi-iglesia",
+  "icon": "data:image/png;base64,...",
+  "ministries": ["Alabanza", "Pastoral", "Jóvenes"],
+  "member_roles": ["Vocalista", "Pianista", "Guitarrista"],
+  "require_2fa_admins": false
+}
+```
+
+**Errors**
+
+| Code | Detail |
+|------|--------|
+| 401  | Token inválido / No autenticado |
+| 403  | Se requiere rol de admin |
+| 409  | Ese alias ya está en uso |
 
 **POST /tenant/{slug}/members — Request body**
 ```json

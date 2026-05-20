@@ -19,6 +19,19 @@ from app.services.tenant_provisioner import (
 
 router = APIRouter(prefix="/organizations", tags=["Organizations"])
 
+# ── Default org settings (seeded into every new organization) ────────────────
+
+DEFAULT_MINISTRIES: list[str] = [
+    "Alabanza", "Audio/Visual", "Pastoral", "Jóvenes", "Niños",
+]
+
+DEFAULT_MEMBER_ROLES: list[str] = [
+    "Predicador", "Técnico de Sonido", "Proyección", "Secretaria", "Tesorero",
+    "Pastor o Anciano", "Técnico de Audio/Visual", "Líder de Adoración",
+    "Guitarra Eléctrica", "Guitarra Acústica", "Bajo", "Piano", "Batería",
+    "Vocalista", "Profesor",
+]
+
 
 async def _with_member_count(db: AsyncSession, orgs: list[Organization]) -> list[dict]:
     if not orgs:
@@ -99,6 +112,8 @@ async def create_organization(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Slug already in use")
 
     org = Organization(**payload.model_dump())
+    org.ministries   = list(DEFAULT_MINISTRIES)
+    org.member_roles = list(DEFAULT_MEMBER_ROLES)
     db.add(org)
     await db.flush()
     await db.refresh(org)
@@ -291,4 +306,11 @@ async def get_org_by_slug(
     org = result.scalar_one_or_none()
     if not org:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
-    return {"id": str(org.id), "name": org.name, "slug": org.slug, "alias": org.alias, "plan": org.plan}
+    return {
+        "id": str(org.id), "name": org.name, "slug": org.slug,
+        "alias": org.alias, "plan": org.plan,
+        "ministries": org.ministries or [],
+        "member_roles": org.member_roles or [],
+        "icon": org.icon,
+        "require_2fa_admins": org.require_2fa_admins or False,
+    }

@@ -31,6 +31,10 @@ class Organization(Base):
     website: Mapped[str | None] = mapped_column(String(255), nullable=True)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     alias: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True, index=True)
+    ministries: Mapped[list] = mapped_column(JSON, default=list)
+    member_roles: Mapped[list] = mapped_column(JSON, default=list)
+    icon: Mapped[str | None] = mapped_column(Text, nullable=True)
+    require_2fa_admins: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 

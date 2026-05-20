@@ -61,7 +61,11 @@ class OrganizationRead(OrganizationBase):
     id: uuid.UUID
     created_at: datetime
     updated_at: datetime
-    member_count: int = 0  # populated by the endpoint
+    member_count: int = 0
+    ministries: list[str] = []
+    member_roles: list[str] = []
+    icon: str | None = None
+    require_2fa_admins: bool = False
 
 
 # ── OrgMember (tenant user — belongs to one organization) ────────────────────
@@ -140,6 +144,15 @@ class OrgMemberWithOrg(OrgMemberRead):
 
 
 # ── OrgRole ───────────────────────────────────────────────────────────────────
+
+class OrgSettingsUpdate(BaseModel):
+    name: str | None = None
+    alias: str | None = None
+    ministries: list[str] | None = None
+    member_roles: list[str] | None = None
+    icon: str | None = None
+    require_2fa_admins: bool | None = None
+
 
 class OrgRoleBase(BaseModel):
     name: str

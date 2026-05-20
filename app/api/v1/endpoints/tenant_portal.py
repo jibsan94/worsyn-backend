@@ -15,7 +15,7 @@ from app.core.config import get_settings
 from app.core.security import decode_token, verify_password
 from app.db.session import get_db
 from app.models.models import OrgMember, Organization
-from app.schemas.schemas import OrgMemberCreate, OrgMemberRead, OrgMemberUpdate
+from app.schemas.schemas import OrgMemberCreate, OrgMemberRead, OrgMemberUpdate, OrgSettingsUpdate, OrganizationRead
 
 settings = get_settings()
 router = APIRouter(prefix="/tenant", tags=["Tenant Portal"])
@@ -41,6 +41,36 @@ async def _get_org_by_slug(db: AsyncSession, slug: str) -> Organization:
     if org is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
     return org
+
+
+from app.api.v1.endpoints.organizations import DEFAULT_MINISTRIES, DEFAULT_MEMBER_ROLES
+
+
+@router.get("/{slug}/settings/defaults")
+async def get_org_defaults(slug: str):
+    """Returns the platform default ministries and roles (for reset-to-defaults UI)."""
+    return {"ministries": DEFAULT_MINISTRIES, "member_roles": DEFAULT_MEMBER_ROLES}
+
+
+async def _get_tenant_admin(
+    authorization: str | None, slug: str, db: AsyncSession
+) -> OrgMember:
+    """Validate tenant JWT and require admin role."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
+    data = decode_token(authorization[7:])
+    if data.get("type") != "tenant_access" or data.get("org_slug") != slug:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+    org = await _get_org_by_slug(db, slug)
+    result = await db.execute(
+        select(OrgMember).where(OrgMember.id == data["sub"], OrgMember.org_id == org.id)
+    )
+    member = result.scalar_one_or_none()
+    if not member or not member.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión inválida")
+    if member.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Se requiere rol de admin")
+    return member
 
 
 async def _get_member_or_404(db: AsyncSession, org_id: uuid.UUID, member_id: uuid.UUID) -> OrgMember:
@@ -145,6 +175,60 @@ async def delete_member(slug: str, member_id: uuid.UUID, db: AsyncSession = Depe
     org = await _get_org_by_slug(db, slug)
     member = await _get_member_or_404(db, org.id, member_id)
     await db.delete(member)
+
+
+# ── Org settings ─────────────────────────────────────────────────────────────
+
+@router.get("/{slug}/settings", response_model=OrganizationRead)
+async def get_org_settings(slug: str, db: AsyncSession = Depends(get_db)):
+    """Returns org data including settings fields. Public (slug-scoped)."""
+    org = await _get_org_by_slug(db, slug)
+    result = await db.execute(select(OrgMember).where(OrgMember.org_id == org.id))
+    count = len(result.scalars().all())
+    read = OrganizationRead.model_validate(org)
+    read.member_count = count
+    return read
+
+
+@router.patch("/{slug}/settings", response_model=OrganizationRead)
+async def update_org_settings(
+    slug: str,
+    payload: OrgSettingsUpdate,
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update org settings. Requires admin tenant token."""
+    await _get_tenant_admin(authorization, slug, db)
+    org = await _get_org_by_slug(db, slug)
+
+    if payload.name is not None:
+        org.name = payload.name.strip()
+    if payload.alias is not None:
+        new_alias = payload.alias.strip() or None
+        if new_alias and new_alias != org.alias:
+            dup = await db.execute(
+                select(Organization).where(Organization.alias == new_alias, Organization.id != org.id)
+            )
+            if dup.scalar_one_or_none():
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese alias ya está en uso")
+        org.alias = new_alias
+    if payload.ministries is not None:
+        org.ministries = payload.ministries
+    if payload.member_roles is not None:
+        org.member_roles = payload.member_roles
+    if payload.icon is not None:
+        org.icon = payload.icon if payload.icon else None
+    if payload.require_2fa_admins is not None:
+        org.require_2fa_admins = payload.require_2fa_admins
+
+    await db.flush()
+    await db.refresh(org)
+
+    result = await db.execute(select(OrgMember).where(OrgMember.org_id == org.id))
+    count = len(result.scalars().all())
+    read = OrganizationRead.model_validate(org)
+    read.member_count = count
+    return read
 
 
 # ── Tenant portal auth ────────────────────────────────────────────────────────

@@ -129,6 +129,11 @@ tenants          — tenant Docker por organización (one-to-one con organizatio
   org_id (PK+FK), status, db_port, db_password, container_name,
   compose_dir, provisioned_at, error_msg, updated_at
 
+organizations    — tenants (iglesias cliente)
+  id, name, slug, plan, status, country, city, phone, website, email, alias,
+  ministries (JSONB []), member_roles (JSONB []), icon (TEXT base64), require_2fa_admins,
+  created_at, updated_at
+
 org_members      — usuarios de cada iglesia (no tienen acceso al panel)
   id, org_id, email, hashed_password (nullable), full_name, phone, role, is_active,
   joined_at, updated_at,
