@@ -44,6 +44,13 @@ def create_partial_token(subject: str | Any) -> str:
     return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
 
 
+def create_org_select_token(email: str, slugs: list[str]) -> str:
+    """Short-lived token (10 min) issued after credential validation to allow org selection."""
+    expire = datetime.now(timezone.utc) + timedelta(minutes=10)
+    payload = {"sub": email, "orgs": slugs, "exp": expire, "type": "org_select"}
+    return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+
+
 def decode_token(token: str) -> dict:
     try:
         return jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])

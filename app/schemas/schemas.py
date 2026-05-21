@@ -135,6 +135,26 @@ class OrgMemberRead(OrgMemberBase):
     is_active: bool
     joined_at: datetime
     updated_at: datetime
+    avatar: str | None = None
+
+
+class OrgMemberSelfUpdate(BaseModel):
+    """Fields a member can update on their own profile (no role/status changes)."""
+    full_name: str | None = None
+    phone: str | None = None
+    prefix: str | None = None
+    gender: str | None = None
+    birthdate: date | None = None
+    anniversary: date | None = None
+    email: str | None = None
+    avatar: str | None = None
+
+    @field_validator("email")
+    @classmethod
+    def email_has_at(cls, v: str | None) -> str | None:
+        if v is not None and "@" not in v:
+            raise ValueError("Invalid email address")
+        return v.lower() if v else v
 
 
 class OrgMemberWithOrg(OrgMemberRead):

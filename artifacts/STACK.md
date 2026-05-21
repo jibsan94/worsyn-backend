@@ -121,6 +121,36 @@ src/
 | Alembic           | —       | Migraciones (configurado, no en uso activo aún) |
 
 ### Modelos de base de datos
+### Tenant module tables (Fase 1 — vacías, scaffolded)
+
+Cada módulo de tenant es independiente: tabla(s) propias + endpoint en fichero separado.
+Para mantenimiento, comentar `include_router()` en `app/api/v1/router.py`.
+
+```
+service_types        — categorías (Servicio Dominical, Eventos)
+  id, org_id (FK→organizations), name, color, sort_order, created_at, updated_at
+service_plans        — instancias de servicio
+  id, org_id, service_type_id, title, scheduled_at, status, notes
+songs                — biblioteca de canciones
+  id, org_id, title, author, song_key, tempo, ccli, lyrics, chords (JSON), tags (JSON)
+media_assets         — multimedia (imagen/vídeo/audio/doc)
+  id, org_id, name, kind, url, size_bytes, mime, uploaded_at
+teams                — equipos de voluntarios
+  id, org_id, name, color, description
+team_memberships     — pertenencia equipo↔org_member (m:n)
+  id, team_id, member_id, role
+scores               — partituras (por instrumento)
+  id, org_id, song_id, title, score_key, instrument, file_url
+events               — eventos puntuales (campamentos, retiros)
+  id, org_id, name, starts_at, ends_at, location, description
+rehearsals           — ensayos (opcional link a service_plan)
+  id, org_id, service_plan_id, scheduled_at, location, notes
+finance_transactions — diezmos, ofrendas, gastos
+  id, org_id, amount_cents, currency, kind, description, category, occurred_on
+```
+
+### Tablas principales
+
 ```
 organizations    — tenants (iglesias cliente)
   id, name, slug, plan, status, country, city, phone, website, created_at
@@ -137,7 +167,14 @@ organizations    — tenants (iglesias cliente)
 org_members      — usuarios de cada iglesia (no tienen acceso al panel)
   id, org_id, email, hashed_password (nullable), full_name, phone, role, is_active,
   joined_at, updated_at,
-  prefix, gender, birthdate, anniversary, ministry, org_roles (JSONB [])
+  prefix, gender, birthdate, anniversary, ministry, org_roles (JSONB []),
+  avatar (TEXT nullable — base64 data URL, max ~3 MB)
+
+member_attachments — ficheros adjuntos a org_members (base64 en DB)
+  id, org_id (FK→organizations CASCADE), member_id (FK→org_members CASCADE),
+  label (VARCHAR 255 — nombre legible), original_name, mime_type, size_bytes,
+  file_data (TEXT base64 — max 10 MB decoded), uploaded_at
+  Upload/download/preview restringido a role admin o leader en la org.
 
 system_users     — operadores del panel Worsyn (antes: admin_users)
   id, username, email, hashed_password, full_name, role,
@@ -152,8 +189,21 @@ system_settings  — configuración clave-valor del sistema
 ### Seguridad
 - Contraseñas: bcrypt con 12 rounds, truncado explícito a 72 bytes (`plain[:72]`)
 - JWT access token: 30 min · Refresh token: 7 días
+- Cookies httpOnly: `worsyn_access` (admin, 30min) · `worsyn_refresh` (admin, 7d) · `tenant_access` (tenant, 7d, impersonation: 1h)
+- Auth acepta `Authorization: Bearer <token>` O cookie httpOnly (header tiene prioridad)
+- Logout: `POST /auth/logout` (admin) · `POST /tenant/{slug}/auth/logout` (tenant) → borra cookies
 - `require_role(*roles)` dependency factory para guards por rol
 - 401 en cualquier endpoint → frontend limpia sesión y redirige a `/login`
+
+### Login unificado de tenants
+- **URL única `/portal`** para todos los tenants — no hay login por organización
+- `POST /tenant/auth/login` (email+password) → valida contra todas las orgs activas
+  - 1 org coincide → frontend llama `/tenant/auth/select` → entra al portal
+  - 2+ orgs coinciden → picker visual → user elige → `/tenant/auth/select` → portal
+- `partial_token` (10 min, JWT type `org_select`) encierra la lista de slugs autorizados
+- `/portal/:slug` sin cookie válida → redirige a `/portal`
+- Email único por org: índice `UNIQUE(org_id, email)` en `org_members`
+- **Impersonation**: `POST /organizations/{id}/impersonate` (admin+) → cookie `tenant_access` con flag `impersonating: true` → admin entra al portal con rol sintético `admin` para soporte. Auditado como `org.impersonate`
 
 ### Seed automático
 Al arrancar, si `system_users` está vacío, se crea:

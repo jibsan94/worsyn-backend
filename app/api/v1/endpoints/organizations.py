@@ -1,11 +1,14 @@
 """Organization CRUD + tenant management endpoints."""
 import uuid
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
+from jose import jwt
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.endpoints.auth import get_current_user, require_role
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.models import AdminUser, Organization, OrgMember, Tenant
 from app.schemas.schemas import (
@@ -176,6 +179,40 @@ async def delete_organization(
     await log_action(db, user, "org.delete", "org", str(org_id), org_name,
                      {"slug": org_slug})
     await db.delete(org)
+
+
+@router.post("/{org_id}/impersonate")
+async def impersonate_org(
+    org_id: uuid.UUID,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_role("admin", "owner")),
+):
+    """Admin/owner enters the org portal as a synthetic super-admin (support mode)."""
+    org = await _get_org_or_404(db, org_id)
+
+    settings = get_settings()
+    expire = datetime.now(timezone.utc) + timedelta(hours=1)
+    payload = {
+        "sub": f"impersonator:{user.id}",
+        "admin_id": str(user.id),
+        "admin_username": user.username,
+        "admin_full_name": user.full_name or user.username,
+        "org_id": str(org.id),
+        "org_slug": org.slug,
+        "exp": expire,
+        "type": "tenant_access",
+        "impersonating": True,
+    }
+    token = jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+
+    response.set_cookie(
+        "tenant_access", token,
+        max_age=60 * 60, httponly=True, samesite="lax", secure=False, path="/",
+    )
+    await log_action(db, user, "org.impersonate", "org", str(org.id), org.name,
+                     {"slug": org.slug})
+    return {"slug": org.slug, "org_name": org.name, "expires_in": 3600}
 
 
 @router.get("/{org_id}/tenant", response_model=TenantRead)

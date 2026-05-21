@@ -576,6 +576,20 @@ Tenant statuses: `provisioning` | `running` | `stopped` | `error`
 
 ---
 
+### POST /organizations/{org_id}/impersonate
+**Support mode** — issues a 1-hour `tenant_access` cookie that lets an admin/owner enter the org portal with synthetic super-admin permissions (role = `admin`, all writes allowed). The portal `/auth/me` endpoint detects the `impersonating: true` JWT flag and returns a synthetic profile (`<admin_username>@worsyn.support`).
+
+**Auth required:** admin, owner
+
+**Response 200**
+```json
+{ "slug": "lifeboat", "org_name": "LifeBoat", "expires_in": 3600 }
+```
+
+Side effect: sets cookie `tenant_access` (httpOnly, 1h). Logged via `org.impersonate` audit event.
+
+---
+
 ### POST /organizations/{org_id}/tenant/start
 Start a stopped tenant container.
 
@@ -753,10 +767,34 @@ Nested under `/organizations/{org_id}/members`:
 | POST   | `/tenant/{slug}/members` | none | Create member |
 | PUT    | `/tenant/{slug}/members/{id}` | none | Update member |
 | DELETE | `/tenant/{slug}/members/{id}` | none | Delete member |
-| POST   | `/tenant/{slug}/auth/login` | none | Login → 7-day tenant JWT |
-| GET    | `/tenant/{slug}/auth/me` | tenant JWT | Validate session / get member info |
+| GET    | `/tenant/{slug}/members/{id}/attachments` | JWT or cookie | List attachments (metadata only) |
+| POST   | `/tenant/{slug}/members/{id}/attachments` | JWT or cookie (admin/leader) | Upload attachment — multipart: `file` + `label` (max 10 MB) |
+| GET    | `/tenant/{slug}/members/{id}/attachments/{att_id}/data` | JWT or cookie (admin/leader) | Get base64 file_data + mime_type for preview/download |
+| DELETE | `/tenant/{slug}/members/{id}/attachments/{att_id}` | JWT or cookie (admin/leader) | Delete attachment |
+| POST   | `/tenant/auth/login` | none | **Unified login** — email+password → matching orgs + partial_token (10 min) |
+| POST   | `/tenant/auth/select` | none | **Org selection** — partial_token + slug → tenant_access cookie |
+| GET    | `/tenant/{slug}/auth/switch-options` | JWT or cookie | **Account switch** — returns other orgs for this member + new partial_token (10 min) |
+| POST   | `/tenant/{slug}/auth/login` | none | Per-slug login (legacy / direct access) → 7-day cookie |
+| GET    | `/tenant/{slug}/auth/me` | JWT or cookie | Validate session / get member info (incl. avatar) |
+| POST   | `/tenant/{slug}/auth/logout` | none | Clear `tenant_access` cookie |
+| PATCH  | `/tenant/{slug}/auth/profile` | JWT or cookie | Self-update own profile + avatar (max 3 MB base64) |
 | GET    | `/tenant/{slug}/settings` | none | Get org settings (incl. ministries, roles, icon) |
-| PATCH  | `/tenant/{slug}/settings` | tenant JWT (admin role) | Update org settings |
+| PATCH  | `/tenant/{slug}/settings` | JWT or cookie (admin role) | Update org settings |
+| GET    | `/tenant/{slug}/settings/defaults` | none | Get platform default ministries and roles |
+
+**GET /tenant/{slug}/auth/switch-options — Response**
+```json
+{
+  "orgs": [
+    { "slug": "org-b", "name": "Iglesia Beta", "icon": null }
+  ],
+  "partial_token": "<10-min org_select JWT>"
+}
+```
+- `orgs` excludes the current org. Empty array if member only belongs to one org or is impersonating.
+- Frontend shows "Cambiar de cuenta" in topbar dropdown only when `orgs.length > 0`.
+- If 1 other org → auto-switch with loading screen. If 2+ → picker modal.
+- Then calls `POST /tenant/auth/select` with the returned `partial_token` + target `slug`.
 
 **PATCH /tenant/{slug}/settings — Request body (all fields optional)**
 ```json

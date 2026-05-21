@@ -6,19 +6,21 @@ CRUD endpoints are currently public (slug-scoped); tenant auth guard to be added
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
 from jose import jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.security import decode_token, verify_password
+from app.core.security import create_org_select_token, decode_token, verify_password
 from app.db.session import get_db
 from app.models.models import OrgMember, Organization
-from app.schemas.schemas import OrgMemberCreate, OrgMemberRead, OrgMemberUpdate, OrgSettingsUpdate, OrganizationRead
+from app.schemas.schemas import OrgMemberCreate, OrgMemberRead, OrgMemberSelfUpdate, OrgMemberUpdate, OrgSettingsUpdate, OrganizationRead
 
 settings = get_settings()
 router = APIRouter(prefix="/tenant", tags=["Tenant Portal"])
+
+_COOKIE: dict = dict(httponly=True, samesite="lax", secure=False, path="/")
 
 
 def _create_tenant_token(member_id: str, org_id: str, org_slug: str) -> str:
@@ -32,7 +34,11 @@ def _create_tenant_token(member_id: str, org_id: str, org_slug: str) -> str:
     }
     return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
 
-router = APIRouter(prefix="/tenant", tags=["Tenant Portal"])
+
+def _extract_token(authorization: str | None, cookie: str | None) -> str | None:
+    if authorization and authorization.startswith("Bearer "):
+        return authorization[7:]
+    return cookie
 
 
 async def _get_org_by_slug(db: AsyncSession, slug: str) -> Organization:
@@ -46,6 +52,145 @@ async def _get_org_by_slug(db: AsyncSession, slug: str) -> Organization:
 from app.api.v1.endpoints.organizations import DEFAULT_MINISTRIES, DEFAULT_MEMBER_ROLES
 
 
+# ── Unified tenant login (no org slug needed) ─────────────────────────────────
+
+@router.post("/auth/login")
+async def tenant_unified_login(body: dict, db: AsyncSession = Depends(get_db)):
+    """Step 1: validate credentials across all orgs. Returns matching orgs + partial token."""
+    email = (body.get("email") or "").lower().strip()
+    password = body.get("password") or ""
+    if not email or not password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email y contraseña requeridos")
+
+    rows = (await db.execute(
+        select(OrgMember, Organization)
+        .join(Organization, OrgMember.org_id == Organization.id)
+        .where(OrgMember.email == email, OrgMember.is_active == True, Organization.status == "active")
+    )).all()
+
+    if not rows:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales incorrectas")
+
+    valid: list[dict] = []
+    for member, org in rows:
+        if member.hashed_password is None or verify_password(password, member.hashed_password):
+            valid.append({
+                "slug": org.slug,
+                "name": org.name,
+                "icon": org.icon,
+            })
+
+    if not valid:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales incorrectas")
+
+    slugs = [o["slug"] for o in valid]
+    partial_token = create_org_select_token(email, slugs)
+    return {"orgs": valid, "partial_token": partial_token}
+
+
+@router.post("/auth/select")
+async def tenant_select_org(body: dict, response: Response, db: AsyncSession = Depends(get_db)):
+    """Step 2: user picks an org. Issues tenant_access cookie for that org."""
+    partial_token = body.get("partial_token") or ""
+    slug = body.get("slug") or ""
+
+    data = decode_token(partial_token)
+    if data.get("type") != "org_select":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado")
+    if slug not in data.get("orgs", []):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organización no autorizada")
+
+    email: str = data["sub"]
+    org = await _get_org_by_slug(db, slug)
+
+    result = await db.execute(
+        select(OrgMember).where(OrgMember.org_id == org.id, OrgMember.email == email)
+    )
+    member = result.scalar_one_or_none()
+    if not member or not member.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Miembro no encontrado")
+
+    token = _create_tenant_token(str(member.id), str(org.id), slug)
+    response.set_cookie("tenant_access", token, max_age=7 * 24 * 60 * 60, **_COOKIE)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "member": {
+            "id": str(member.id),
+            "email": member.email,
+            "full_name": member.full_name,
+            "role": member.role,
+            "org_id": str(org.id),
+            "org_name": org.name,
+            "org_slug": slug,
+            "avatar": member.avatar,
+        },
+    }
+
+
+@router.get("/auth/switch-options")
+async def tenant_switch_options_no_slug(
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Alias without slug — uses org_slug from token. Returns other orgs for this member."""
+    token = _extract_token(authorization, tenant_access)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
+    data = decode_token(token)
+    if data.get("type") != "tenant_access":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+    slug = data.get("org_slug", "")
+    return await _switch_options_for_slug(slug, data, db)
+
+
+@router.get("/{slug}/auth/switch-options")
+async def tenant_switch_options(
+    slug: str,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get other orgs the member belongs to (excluding current). Returns partial_token for switching."""
+    token = _extract_token(authorization, tenant_access)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
+    data = decode_token(token)
+    if data.get("type") != "tenant_access" or data.get("org_slug") != slug:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+    return await _switch_options_for_slug(slug, data, db)
+
+
+async def _switch_options_for_slug(slug: str, token_data: dict, db: AsyncSession) -> dict:
+    if token_data.get("impersonating"):
+        return {"orgs": [], "partial_token": None}
+
+    member_id = token_data["sub"]
+    result = await db.execute(select(OrgMember).where(OrgMember.id == member_id))
+    member = result.scalar_one_or_none()
+    if not member:
+        return {"orgs": [], "partial_token": None}
+
+    rows = (await db.execute(
+        select(OrgMember, Organization)
+        .join(Organization, OrgMember.org_id == Organization.id)
+        .where(OrgMember.email == member.email, OrgMember.is_active == True, Organization.status == "active")
+    )).all()
+
+    other_orgs = [
+        {"slug": org.slug, "name": org.name, "icon": org.icon}
+        for _, org in rows
+        if org.slug != slug
+    ]
+
+    if not other_orgs:
+        return {"orgs": [], "partial_token": None}
+
+    partial_token = create_org_select_token(member.email, [o["slug"] for o in other_orgs])
+    return {"orgs": other_orgs, "partial_token": partial_token}
+
+
 @router.get("/{slug}/settings/defaults")
 async def get_org_defaults(slug: str):
     """Returns the platform default ministries and roles (for reset-to-defaults UI)."""
@@ -53,12 +198,13 @@ async def get_org_defaults(slug: str):
 
 
 async def _get_tenant_admin(
-    authorization: str | None, slug: str, db: AsyncSession
+    authorization: str | None, slug: str, db: AsyncSession, *, cookie: str | None = None
 ) -> OrgMember:
     """Validate tenant JWT and require admin role."""
-    if not authorization or not authorization.startswith("Bearer "):
+    token = _extract_token(authorization, cookie)
+    if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
-    data = decode_token(authorization[7:])
+    data = decode_token(token)
     if data.get("type") != "tenant_access" or data.get("org_slug") != slug:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
     org = await _get_org_by_slug(db, slug)
@@ -195,10 +341,11 @@ async def update_org_settings(
     slug: str,
     payload: OrgSettingsUpdate,
     authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     """Update org settings. Requires admin tenant token."""
-    await _get_tenant_admin(authorization, slug, db)
+    await _get_tenant_admin(authorization, slug, db, cookie=tenant_access)
     org = await _get_org_by_slug(db, slug)
 
     if payload.name is not None:
@@ -233,8 +380,15 @@ async def update_org_settings(
 
 # ── Tenant portal auth ────────────────────────────────────────────────────────
 
+@router.post("/{slug}/auth/logout")
+async def tenant_logout(slug: str, response: Response):
+    """Clear tenant session cookie."""
+    response.delete_cookie("tenant_access", path="/")
+    return {"ok": True}
+
+
 @router.post("/{slug}/auth/login")
-async def tenant_login(slug: str, body: dict, db: AsyncSession = Depends(get_db)):
+async def tenant_login(slug: str, body: dict, response: Response, db: AsyncSession = Depends(get_db)):
     """Login as an org member. Returns tenant JWT (7-day access token).
 
     Members without a password set (hashed_password is null) are accepted with
@@ -258,6 +412,7 @@ async def tenant_login(slug: str, body: dict, db: AsyncSession = Depends(get_db)
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales incorrectas")
 
     token = _create_tenant_token(str(member.id), str(org.id), slug)
+    response.set_cookie("tenant_access", token, max_age=7 * 24 * 60 * 60, **_COOKIE)
     return {
         "access_token": token,
         "token_type": "bearer",
@@ -269,25 +424,96 @@ async def tenant_login(slug: str, body: dict, db: AsyncSession = Depends(get_db)
             "org_id": str(org.id),
             "org_name": org.name,
             "org_slug": slug,
+            "avatar": member.avatar,
         },
     }
+
+
+@router.patch("/{slug}/auth/profile", response_model=OrgMemberRead)
+async def update_own_profile(
+    slug: str,
+    payload: OrgMemberSelfUpdate,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update the signed-in member's own profile (name, phone, avatar, etc.)."""
+    token = _extract_token(authorization, tenant_access)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
+    data = decode_token(token)
+    if data.get("type") != "tenant_access" or data.get("org_slug") != slug:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
+    org = await _get_org_by_slug(db, slug)
+    result = await db.execute(
+        select(OrgMember).where(OrgMember.id == data["sub"], OrgMember.org_id == org.id)
+    )
+    member = result.scalar_one_or_none()
+    if not member or not member.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión inválida")
+
+    if payload.full_name is not None:
+        member.full_name = payload.full_name
+    if payload.phone is not None:
+        member.phone = payload.phone
+    if payload.prefix is not None:
+        member.prefix = payload.prefix
+    if payload.gender is not None:
+        member.gender = payload.gender
+    if payload.birthdate is not None:
+        member.birthdate = payload.birthdate
+    if payload.anniversary is not None:
+        member.anniversary = payload.anniversary
+    if payload.email is not None:
+        new_email = payload.email.lower()
+        if new_email != member.email:
+            dup = await db.execute(
+                select(OrgMember).where(OrgMember.org_id == org.id, OrgMember.email == new_email)
+            )
+            if dup.scalar_one_or_none():
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese correo ya está en uso")
+            member.email = new_email
+    if payload.avatar is not None:
+        if payload.avatar and len(payload.avatar) > 4_194_304:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La imagen no puede superar 3 MB")
+        member.avatar = payload.avatar if payload.avatar else None
+
+    await db.flush()
+    await db.refresh(member)
+    return member
 
 
 @router.get("/{slug}/auth/me")
 async def tenant_me(
     slug: str,
     authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     """Validate an existing tenant token. Returns member info."""
-    if not authorization or not authorization.startswith("Bearer "):
+    token = _extract_token(authorization, tenant_access)
+    if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
-    token = authorization[7:]
     data = decode_token(token)
     if data.get("type") != "tenant_access" or data.get("org_slug") != slug:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
     org = await _get_org_by_slug(db, slug)
+
+    # Impersonation session: admin from main panel viewing the portal with elevated perms
+    if data.get("impersonating"):
+        return {
+            "id": data["sub"],
+            "email": f"{data.get('admin_username', 'admin')}@worsyn.support",
+            "full_name": f"{data.get('admin_full_name', 'Admin')} (Soporte Worsyn)",
+            "role": "admin",
+            "org_id": str(org.id),
+            "org_name": org.name,
+            "org_slug": slug,
+            "avatar": None,
+            "impersonating": True,
+        }
+
     result = await db.execute(
         select(OrgMember).where(OrgMember.id == data["sub"], OrgMember.org_id == org.id)
     )
@@ -303,4 +529,6 @@ async def tenant_me(
         "org_id": str(org.id),
         "org_name": org.name,
         "org_slug": slug,
+        "avatar": member.avatar,
+        "impersonating": False,
     }

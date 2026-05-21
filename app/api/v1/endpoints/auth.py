@@ -2,8 +2,8 @@
 from datetime import datetime, timezone
 
 import redis as redis_lib
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,7 +28,7 @@ settings = get_settings()
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+_COOKIE: dict = dict(httponly=True, samesite="lax", secure=False, path="/")
 
 
 def _redis() -> redis_lib.Redis:
@@ -36,9 +36,17 @@ def _redis() -> redis_lib.Redis:
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
+    authorization: str | None = Header(default=None),
+    worsyn_access: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> AdminUser:
+    token: str | None = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:]
+    elif worsyn_access:
+        token = worsyn_access
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
     payload = decode_token(token)
     user_id = payload.get("sub")
     if not user_id or payload.get("type") != "access":
@@ -61,8 +69,17 @@ def require_role(*roles: str):
 
 # ── Login ─────────────────────────────────────────────────────────────────────
 
+@router.post("/logout")
+async def logout(response: Response):
+    """Clear admin session cookies."""
+    response.delete_cookie("worsyn_access", path="/")
+    response.delete_cookie("worsyn_refresh", path="/")
+    return {"ok": True}
+
+
 @router.post("/login")
 async def login(
+    response: Response,
     form: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ):
@@ -93,10 +110,14 @@ async def login(
 
     user.last_login_at = datetime.now(timezone.utc)
     await log_action(db, user, "auth.login", "session", resource_name=user.username)
+    access = create_access_token(str(user.id))
+    refresh = create_refresh_token(str(user.id))
+    response.set_cookie("worsyn_access", access, max_age=30 * 60, **_COOKIE)
+    response.set_cookie("worsyn_refresh", refresh, max_age=7 * 24 * 60 * 60, **_COOKIE)
     return {
         "requires_2fa": False,
-        "access_token": create_access_token(str(user.id)),
-        "refresh_token": create_refresh_token(str(user.id)),
+        "access_token": access,
+        "refresh_token": refresh,
         "token_type": "bearer",
         "must_change_password": user.must_change_password,
         "role": user.role,
@@ -106,6 +127,7 @@ async def login(
 @router.post("/2fa/complete")
 async def complete_2fa_login(
     payload: dict,
+    response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     """Second step of login when user has 2FA enabled.
@@ -130,10 +152,14 @@ async def complete_2fa_login(
 
     user.last_login_at = datetime.now(timezone.utc)
     await log_action(db, user, "auth.2fa.complete", "session", resource_name=user.username)
+    access = create_access_token(str(user.id))
+    refresh = create_refresh_token(str(user.id))
+    response.set_cookie("worsyn_access", access, max_age=30 * 60, **_COOKIE)
+    response.set_cookie("worsyn_refresh", refresh, max_age=7 * 24 * 60 * 60, **_COOKIE)
     return {
         "requires_2fa": False,
-        "access_token": create_access_token(str(user.id)),
-        "refresh_token": create_refresh_token(str(user.id)),
+        "access_token": access,
+        "refresh_token": refresh,
         "token_type": "bearer",
         "must_change_password": user.must_change_password,
         "role": user.role,
