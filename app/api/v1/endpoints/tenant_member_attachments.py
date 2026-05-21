@@ -30,13 +30,20 @@ async def _auth_org(slug: str, authorization: str | None, cookie: str | None, db
     data = decode_token(token)
     if data.get("type") != "tenant_access" or data.get("org_slug") != slug:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
-    result = await db.execute(select(Organization).where(Organization.slug == slug))
-    org = result.scalar_one_or_none()
+    org = (await db.execute(select(Organization).where(Organization.slug == slug))).scalar_one_or_none()
     if org is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Org no encontrada")
     caller_id = data.get("sub")
-    caller_role = data.get("org_role", "member")
-    return org, caller_id, caller_role
+    # Impersonation: admin Worsyn entra como admin sintético
+    if data.get("impersonating"):
+        return org, caller_id, "admin"
+    # Role real desde BD (no del JWT — puede haber cambiado)
+    caller = (await db.execute(
+        select(OrgMember).where(OrgMember.id == uuid.UUID(caller_id), OrgMember.org_id == org.id)
+    )).scalar_one_or_none()
+    if caller is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Miembro no encontrado")
+    return org, caller_id, caller.role
 
 
 def _require_priv(caller_role: str):
@@ -151,6 +158,37 @@ async def get_attachment_data(
         "file_data": row.file_data,
         "uploaded_at": row.uploaded_at.isoformat(),
     }
+
+
+@router.patch("/{att_id}")
+async def rename_attachment(
+    slug: str, member_id: str, att_id: str,
+    body: dict,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    org, _, caller_role = await _auth_org(slug, authorization, tenant_access, db)
+    _require_priv(caller_role)
+    label = (body.get("label") or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="La etiqueta es obligatoria")
+    try:
+        aid = uuid.UUID(att_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="ID inválido")
+    row = (await db.execute(
+        select(MemberAttachment).where(
+            MemberAttachment.id == aid,
+            MemberAttachment.member_id == uuid.UUID(member_id),
+            MemberAttachment.org_id == org.id,
+        )
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Adjunto no encontrado")
+    row.label = label
+    await db.flush()
+    return {"id": str(row.id), "label": row.label}
 
 
 @router.delete("/{att_id}", status_code=status.HTTP_204_NO_CONTENT)
