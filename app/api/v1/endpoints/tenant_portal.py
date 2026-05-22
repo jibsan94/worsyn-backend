@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.security import create_org_select_token, decode_token, verify_password
 from app.db.session import get_db
-from app.models.models import OrgMember, Organization
+from app.models.models import OrgMember, Organization, ServiceMember
 from app.schemas.schemas import OrgMemberCreate, OrgMemberRead, OrgMemberSelfUpdate, OrgMemberUpdate, OrgSettingsUpdate, OrganizationRead
 
 settings = get_settings()
@@ -500,6 +500,12 @@ async def tenant_me(
 
     org = await _get_org_by_slug(db, slug)
 
+    # All tenant modules — keep in sync with the frontend TenantPortal TModule type
+    ALL_MODULES = [
+        "principal", "servicios", "miembros", "equipos", "partituras",
+        "eventos", "ensayos", "calendario", "finanzas", "configuracion", "perfil",
+    ]
+
     # Impersonation session: admin from main panel viewing the portal with elevated perms
     if data.get("impersonating"):
         return {
@@ -512,6 +518,8 @@ async def tenant_me(
             "org_slug": slug,
             "avatar": None,
             "impersonating": True,
+            "accessible_modules": ALL_MODULES,
+            "service_role": "administrator",
         }
 
     result = await db.execute(
@@ -520,6 +528,24 @@ async def tenant_me(
     member = result.scalar_one_or_none()
     if not member or not member.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesión inválida")
+
+    # Compute module access:
+    #   - Org admin/leader  → all modules
+    #   - Else if has a service_members row → only ['servicios','perfil']
+    #   - Else → ['perfil'] only (cannot really see anything else for now)
+    accessible: list[str]
+    service_role: str | None = None
+    if member.role in ("admin", "leader"):
+        accessible = ALL_MODULES
+    else:
+        sm = (await db.execute(
+            select(ServiceMember).where(ServiceMember.member_id == member.id)
+        )).scalar_one_or_none()
+        if sm is not None:
+            service_role = sm.service_role
+            accessible = ["servicios", "perfil"]
+        else:
+            accessible = ["perfil"]
 
     return {
         "id": str(member.id),
@@ -531,4 +557,6 @@ async def tenant_me(
         "org_slug": slug,
         "avatar": member.avatar,
         "impersonating": False,
+        "accessible_modules": accessible,
+        "service_role": service_role,
     }

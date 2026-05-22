@@ -1,7 +1,7 @@
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, String, Text, Time, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -174,7 +174,11 @@ class AuditLog(Base):
 # Each table FKs to organizations(id) ON DELETE CASCADE. Modules independent.
 
 class ServiceType(Base):
-    """Category of services (e.g. 'Servicio Dominical', 'Campamentos')."""
+    """Category/template of services. Drives the recurrence + the list of
+    weekly/recurring time slots (ServiceTime) + the participating teams (ServiceTeam).
+
+    Recurrence values: none | random | daily | weekly | weekdays | biweekly | monthly
+    """
     __tablename__ = "service_types"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -182,8 +186,39 @@ class ServiceType(Base):
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     color: Mapped[str | None] = mapped_column(String(20), nullable=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    recurrence: Mapped[str] = mapped_column(String(20), nullable=False, default="weekly")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ServiceTime(Base):
+    """One time slot for a ServiceType. Multiple per type allowed
+    (e.g. Sunday 8am + Sunday 11am, or Sunday + Saturday).
+    starts_on is the first occurrence date — used to compute weekday and to project
+    future occurrences according to the parent ServiceType.recurrence.
+    """
+    __tablename__ = "service_times"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    service_type_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_types.id", ondelete="CASCADE"), nullable=False, index=True)
+    starts_on: Mapped[date] = mapped_column(Date, nullable=False)
+    start_time: Mapped[time] = mapped_column(Time, nullable=False)
+    end_time: Mapped[time] = mapped_column(Time, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
+
+
+class ServiceTeam(Base):
+    """M2M between ServiceType and Team — which teams participate in this service."""
+    __tablename__ = "service_teams"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    service_type_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_types.id", ondelete="CASCADE"), nullable=False, index=True)
+    team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False, index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
 
 
 class ServicePlan(Base):
@@ -313,6 +348,57 @@ class MemberAttachment(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     file_data: Mapped[str] = mapped_column(Text, nullable=False)            # base64-encoded content
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
+
+
+class ServiceMember(Base):
+    """A member's permission profile within the Services module.
+
+    Inspired by Planning Center. The org-level role (admin/leader/member in
+    org_members.role) is separate from the service-module role here.
+
+    service_role values: administrator | editor | coordinator | viewer | scheduled_viewer
+      - administrator: full control of services module (add/edit/delete people, types, plans)
+      - editor: edit services, types, plans (no delete people, no add people)
+      - coordinator: coordinate plans within a type (no add/modify types, no delete plans)
+      - viewer: read-only across all services
+      - scheduled_viewer: read-only of *assigned* services only (assignments via teams/plans)
+
+    songs_role / media_role: subset (administrator | editor | viewer | scheduled_viewer)
+    file_access_*: download permission per area
+    welcomed_at: when the welcome email was sent (manual share workflow for now)
+    password_set_at: when the member set their own password (post-welcome)
+    """
+    __tablename__ = "service_members"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    member_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("org_members.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    service_role: Mapped[str] = mapped_column(String(30), nullable=False, default="viewer")
+    songs_role: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    media_role: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    file_access_plans: Mapped[bool] = mapped_column(Boolean, default=True)
+    file_access_songs: Mapped[bool] = mapped_column(Boolean, default=True)
+    file_access_media: Mapped[bool] = mapped_column(Boolean, default=True)
+    welcomed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    password_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # TEST-ONLY plaintext debug field — see /artifacts/CONTEXT.md "Para quitar antes de producción"
+    debug_password: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ServiceMemberTypePerm(Base):
+    """Per-service-type override of a ServiceMember's role.
+
+    role = NULL means *inherit* from ServiceMember.service_role (same as parent).
+    Absence of a row also means inherit (default).
+    """
+    __tablename__ = "service_member_type_perms"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    service_member_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_members.id", ondelete="CASCADE"), nullable=False, index=True)
+    service_type_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_types.id", ondelete="CASCADE"), nullable=False, index=True)
+    role: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
 
 class FinanceTransaction(Base):

@@ -127,18 +127,38 @@ Cada módulo de tenant es independiente: tabla(s) propias + endpoint en fichero 
 Para mantenimiento, comentar `include_router()` en `app/api/v1/router.py`.
 
 ```
-service_types        — categorías (Servicio Dominical, Eventos)
-  id, org_id (FK→organizations), name, color, sort_order, created_at, updated_at
-service_plans        — instancias de servicio
-  id, org_id, service_type_id, title, scheduled_at, status, notes
+service_types        — plantilla de servicio (Servicio Dominical, Campamentos…)
+  id, org_id (FK→organizations CASCADE), name, color, sort_order,
+  recurrence (none|random|daily|weekly|weekdays|biweekly|monthly  default 'weekly'),
+  description (TEXT nullable), created_at, updated_at
+service_times        — franjas horarias de un service_type (puede haber varias)
+  id, org_id (FK CASCADE), service_type_id (FK→service_types CASCADE),
+  starts_on (DATE), start_time (TIME), end_time (TIME), sort_order, created_at
+  Notas: starts_on es la primera ocurrencia; weekday se deriva (date.weekday()).
+service_teams        — M2M service_type ↔ team (qué equipos sirven)
+  id, service_type_id (FK CASCADE), team_id (FK→teams CASCADE), sort_order, created_at
+service_members      — permisos del módulo Servicios por miembro
+  id, org_id (FK CASCADE), member_id (FK→org_members CASCADE, UNIQUE),
+  service_role  (administrator|editor|coordinator|viewer|scheduled_viewer),
+  songs_role    (administrator|editor|viewer|scheduled_viewer  nullable),
+  media_role    (administrator|editor|viewer|scheduled_viewer  nullable),
+  file_access_plans BOOL, file_access_songs BOOL, file_access_media BOOL,
+  welcomed_at (ts nullable), password_set_at (ts nullable),
+  created_at, updated_at
+service_member_type_perms — override por tipo de servicio (Same-as-parent)
+  id, service_member_id (FK CASCADE), service_type_id (FK CASCADE),
+  role (str nullable — NULL = heredar)
+service_plans        — instancia concreta (un domingo específico, etc.)
+  id, org_id (FK CASCADE), service_type_id (FK→service_types SET NULL),
+  title, scheduled_at, status (draft|published|completed), notes
 songs                — biblioteca de canciones
   id, org_id, title, author, song_key, tempo, ccli, lyrics, chords (JSON), tags (JSON)
 media_assets         — multimedia (imagen/vídeo/audio/doc)
   id, org_id, name, kind, url, size_bytes, mime, uploaded_at
-teams                — equipos de voluntarios
-  id, org_id, name, color, description
+teams                — equipos de voluntarios (Adoración, Audio/Visual, Recibo…)
+  id, org_id (FK CASCADE), name, color, description, created_at, updated_at
 team_memberships     — pertenencia equipo↔org_member (m:n)
-  id, team_id, member_id, role
+  id, team_id (FK CASCADE), member_id (FK→org_members CASCADE), role
 scores               — partituras (por instrumento)
   id, org_id, song_id, title, score_key, instrument, file_url
 events               — eventos puntuales (campamentos, retiros)
@@ -148,6 +168,23 @@ rehearsals           — ensayos (opcional link a service_plan)
 finance_transactions — diezmos, ofrendas, gastos
   id, org_id, amount_cents, currency, kind, description, category, occurred_on
 ```
+
+#### Recurrence + occurrence projection
+
+`service_types.recurrence` + `service_times` rows act as a *template*. The endpoint
+`GET /tenant/{slug}/services/occurrences?range_from&range_to` projects the
+template forward (today → today+90d by default) and returns concrete
+`{date, start_time, end_time, service_type_id, color}` rows ordered by
+`(date, start_time)`. The frontend MiniCalendar uses this for day-dots; the
+Calendario Maestro modal uses it for the month-grid view.
+
+Projection rules:
+- `none` / `random` → single anchor date (no repetition)
+- `daily` → +1 day forever
+- `weekly` → +7 days
+- `biweekly` → +14 days
+- `weekdays` → Mon–Fri only
+- `monthly` → same day-of-month, clamped to last day if shorter (e.g. Jan 31 → Feb 28)
 
 ### Tablas principales
 

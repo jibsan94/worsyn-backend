@@ -186,6 +186,23 @@ Cuando `must_change_password: true`:
 - [x] Logs del sistema: `AuditLog` model + `app/services/audit.py` + `GET/GET-count /admin/logs` (owner only)
 - [x] Audit logging integrado en: login, 2FA, change-credentials, user CRUD, org CRUD, tenant lifecycle, settings save
 - [x] Frontend: `/logs` (owner only) con tabla, filtros por acción/recurso/actor, paginación, tags de color
+- [x] **Módulo Servicios (tenant)** — `service_types` extendido con `recurrence` (none|random|daily|weekly|weekdays|biweekly|monthly) + `description`; nuevas tablas `service_times` (franjas horarias) y `service_teams` (M2M con `teams`)
+- [x] Wizard de creación de servicio en 3 pasos: (1) nombre + recurrencia + color · (2) horarios — fecha (default próximo domingo) + hora inicio/fin, multi-fila · (3) equipos participantes (multi-select)
+- [x] Endpoints `POST/PATCH/DELETE /tenant/{slug}/services/types` con nested `times[]` + `team_ids[]` (replace-on-PATCH). Guard `admin/leader`
+- [x] Endpoint `GET /tenant/{slug}/services/occurrences?range_from&range_to` — proyecta `service_times` hacia adelante (90 días por defecto) según recurrence. Devuelve `[{date, start_time, end_time, service_type_id, service_type_name, color}]`
+- [x] MiniCalendar (sidebar) con punto de color por día con ocurrencia. Navegación entre meses con ‹ • ›
+- [x] **Calendario Maestro** — modal full-screen con grid mensual + panel lateral por día seleccionado, eventos con color del service_type
+- [x] Equipos (`/tenant/{slug}/teams`): CRUD completo + memberships (`/teams/{id}/members` POST/DELETE). Listado incluye `member_count`
+- [x] Pestaña **Personas → Equipos** en módulo Servicios: alta/edición/baja de equipos con color y descripción
+- [x] Endpoint `POST /tenant/{slug}/services/plans` para crear plan one-off (instancia concreta de un service_type)
+- [x] Documentación API: nuevas secciones `Tenant · Services` y `Tenant · Teams` en `API-DOCS.md` (preparado para Fase 3/4 — apps móvil + desktop)
+- [x] **Servicios → Personas (permisos a nivel módulo)** — nuevas tablas `service_members` + `service_member_type_perms` con roles dedicados (`administrator | editor | coordinator | viewer | scheduled_viewer`)
+- [x] Auto-provisioning: cualquier org_member con `org_role='admin'` aparece automáticamente como `administrator` en Servicios (idempotente, en cada GET)
+- [x] Wizard de alta de persona en 3 pasos: (1) elegir miembro existente o crear nuevo · (2) permisos (rol global + override por tipo + canciones/media + acceso a ficheros) · (3) bienvenida con contraseña temporal
+- [x] Bienvenida: `POST /tenant/{slug}/services/people/{id}/welcome` genera contraseña temporal (12 chars) y marca `welcomed_at`. La contraseña se muestra UNA VEZ en pantalla (SMTP pendiente — worsyn-integrations)
+- [x] Filtro de sidebar por permisos: `GET /tenant/{slug}/auth/me` devuelve `accessible_modules` + `service_role`. Miembros sin rol de org pero con entrada en `service_members` solo ven Servicios + Perfil. Frontend redirige automáticamente fuera de módulos prohibidos
+- [x] Editor no puede añadir ni eliminar personas — solo Administrador (a nivel servicio) o admin/leader de org pueden gestionar la lista
+- [x] Per-service-type permission overrides ("Mismo que arriba" / rol específico) via `service_member_type_perms`
 
 ## Roles de OrgMember
 
@@ -239,3 +256,41 @@ Ruta pública (sin autenticación de admin) accesible desde el botón "Ver porta
 | `status` | active/trial/suspended/cancelled | Estado de la suscripción |
 | `country` / `city` | str | Ubicación |
 | `phone` / `website` | str | Datos de contacto |
+
+---
+
+## ⚠ Para quitar antes de producción (test-only)
+
+Funcionalidades temporales para QA local. **ELIMINAR cuando el usuario dé la orden.**
+
+### 1. Campo `service_members.debug_password` (plaintext)
+
+- **Tabla**: `service_members.debug_password TEXT NULL`
+- **Por qué**: durante el desarrollo necesitamos ver la contraseña de cada `service_member` para entrar manualmente al portal y comprobar permisos.
+- **Cómo se rellena**: cualquier endpoint que genere una contraseña temporal (POST `/services/people` con `send_welcome:true`, POST `/services/people/{id}/welcome`, POST `/services/people/{id}/reset-password`) escribe el plaintext aquí además del hash en `org_members.hashed_password`.
+- **Cómo se expone**: incluido en la respuesta de `GET /tenant/{slug}/services/people` como `debug_password`.
+
+### 2. Endpoint `POST /tenant/{slug}/services/people/{id}/reset-password`
+
+- **Por qué**: para miembros existentes que ya tienen `hashed_password` configurada (y por tanto el flujo de bienvenida no la regenera), necesitamos forzar un reset y ver el plaintext.
+- **Comportamiento**: fuerza regeneración + guarda plaintext en `debug_password` + actualiza hash + stamp `welcomed_at`. Bloquea para `org_role=admin` (su contraseña vive en el tenant principal).
+- **Definido en**: `app/api/v1/endpoints/tenant_service_people.py` (función `reset_password_debug`).
+
+### 3. Columna "Contraseña (test)" + botón "Reset pw" en frontend
+
+- **Dónde**: pestaña Servicios → Personas, tabla de personas, columna amarilla.
+- **Definido en**: `src/tenant/pages/Servicios.tsx` (`PersonasView` / `resetPasswordDebug`).
+- **Tarjeta amarilla** + estilo `#FFFBEB` para señalizar que es contenido de QA.
+
+### Checklist de eliminación (cuando se ordene)
+
+- [ ] `ALTER TABLE service_members DROP COLUMN debug_password;`
+- [ ] Quitar campo `debug_password` del modelo `ServiceMember` en `app/models/models.py`
+- [ ] Quitar `debug_password` del serializer en `tenant_service_people.py` (`_serialize`)
+- [ ] Quitar asignaciones `sm.debug_password = ...` en POST create + POST welcome
+- [ ] Eliminar endpoint `reset_password_debug` + ruta `POST /services/people/{id}/reset-password`
+- [ ] Quitar campo `debug_password` de `ServicePerson` (interface TS) en `Servicios.tsx`
+- [ ] Quitar columna "Contraseña (test)" y celda asociada en la tabla `PersonasView`
+- [ ] Quitar función `resetPasswordDebug` + botón "Reset pw"
+- [ ] Quitar referencias en `API-DOCS.md`
+

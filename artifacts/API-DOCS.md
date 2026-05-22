@@ -841,6 +841,291 @@ Nested under `/organizations/{org_id}/members`:
 
 ---
 
+## Tenant · Services
+
+All endpoints require a valid `tenant_access` cookie or `Authorization: Bearer <tenant_access>` header. Mutations require `role = admin | leader` on the org. Impersonation tokens behave as `admin`. The role is **read from the DB at request time**, not from the JWT (the tenant_access JWT does not carry `org_role`).
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/tenant/{slug}/services/types` | JWT or cookie | List service types (with nested times + team_ids) |
+| POST   | `/tenant/{slug}/services/types` | admin/leader | Create service type + nested times + team picks |
+| PATCH  | `/tenant/{slug}/services/types/{type_id}` | admin/leader | Update fields and/or replace nested `times` / `team_ids` |
+| DELETE | `/tenant/{slug}/services/types/{type_id}` | admin/leader | Cascade-deletes service_times + service_teams (FK ON DELETE CASCADE) |
+| GET    | `/tenant/{slug}/services/plans` | JWT or cookie | List concrete plan instances (ordered by scheduled_at DESC, NULLS LAST) |
+| POST   | `/tenant/{slug}/services/plans` | admin/leader | Create a one-off plan instance |
+| GET    | `/tenant/{slug}/services/occurrences?range_from=YYYY-MM-DD&range_to=YYYY-MM-DD` | JWT or cookie | Project ServiceTime templates forward into concrete date+time occurrences. Default window: today → today+90d |
+
+### Recurrence values
+
+`none` (one-shot, no projection) · `random` (single anchor, no projection) · `daily` · `weekly` · `weekdays` (Mon–Fri) · `biweekly` · `monthly` (same day-of-month, clamped to last day if shorter)
+
+### POST /tenant/{slug}/services/types — Request body
+
+```json
+{
+  "name": "Servicio Dominical",
+  "color": "#4F46E5",
+  "recurrence": "weekly",
+  "description": null,
+  "sort_order": 0,
+  "times": [
+    { "starts_on": "2026-05-24", "start_time": "09:00", "end_time": "10:15" },
+    { "starts_on": "2026-05-24", "start_time": "11:00", "end_time": "12:15" }
+  ],
+  "team_ids": ["<team-uuid-1>", "<team-uuid-2>"]
+}
+```
+
+Notes:
+- `times[]` is required and must contain at least one entry. Each row creates a `service_times` record.
+- `starts_on` is the **first occurrence date** — its weekday is derived server-side. Recurrence rules project from here.
+- `team_ids[]` are validated against the org; unknown IDs are silently dropped.
+- The default `starts_on` exposed by the wizard UI is **the next Sunday** following today.
+
+### Response 201 — fully hydrated ServiceType
+
+```json
+{
+  "id": "uuid",
+  "name": "Servicio Dominical",
+  "color": "#4F46E5",
+  "sort_order": 0,
+  "recurrence": "weekly",
+  "description": null,
+  "times": [
+    { "id": "uuid", "starts_on": "2026-05-24", "start_time": "09:00", "end_time": "10:15", "weekday": 6, "sort_order": 0 },
+    { "id": "uuid", "starts_on": "2026-05-24", "start_time": "11:00", "end_time": "12:15", "weekday": 6, "sort_order": 1 }
+  ],
+  "team_ids": ["uuid-1", "uuid-2"]
+}
+```
+
+`weekday`: 0=Monday … 6=Sunday (Python `date.weekday()` convention).
+
+### PATCH /tenant/{slug}/services/types/{type_id}
+
+All fields optional. If `times` or `team_ids` is supplied, the existing rows are **replaced** in full.
+
+### GET /tenant/{slug}/services/occurrences — Response
+
+```json
+[
+  {
+    "service_type_id": "uuid",
+    "service_type_name": "Servicio Dominical",
+    "color": "#4F46E5",
+    "date": "2026-05-24",
+    "start_time": "09:00",
+    "end_time": "10:15"
+  }
+]
+```
+
+Ordered by `(date, start_time)`. Frontend mini-calendar uses this to render day dots and the Calendario Maestro modal uses it for the month grid.
+
+### POST /tenant/{slug}/services/plans — Request body
+
+```json
+{
+  "title": "Servicio 24 mayo",
+  "scheduled_at": "2026-05-24T11:00:00",
+  "service_type_id": "uuid-or-null",
+  "status": "draft",
+  "notes": null
+}
+```
+
+### Errors
+
+| Code | Detail |
+|------|--------|
+| 400  | El nombre es obligatorio · Recurrencia inválida · Debes definir al menos un horario · Hora inválida · Fecha inválida · scheduled_at inválido |
+| 401  | No autenticado · Token inválido · Miembro no encontrado |
+| 403  | Solo administradores y líderes |
+| 404  | Tipo no encontrado · Org no encontrada |
+
+---
+
+## Tenant · Service People
+
+Manages who has access to the Services module and at what level. Inspired by Planning Center: per-area roles, per-service-type overrides, file-access flags, and welcome flow.
+
+**Auto-provisioning**: on first GET, any `org_member` with org-role `admin` that lacks a `service_members` row is inserted as `service_role='administrator'` (idempotent). This guarantees existing org admins always appear here as service administrators.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/tenant/{slug}/services/people` | JWT or cookie (any service_member or org admin/leader) | List service members with permissions |
+| POST   | `/tenant/{slug}/services/people` | service administrator OR org admin/leader | Add person (existing org_member or new) with permissions; optional welcome |
+| PATCH  | `/tenant/{slug}/services/people/{sm_id}` | service administrator OR org admin/leader | Update roles / file_access / per-type overrides |
+| DELETE | `/tenant/{slug}/services/people/{sm_id}` | service administrator OR org admin/leader | Remove from Services module (does NOT delete from org_members). **Self-delete guard**: rejects `403` if the target is the caller themselves AND has `org_role == 'admin'` — another org admin must do it. Impersonation tokens bypass this guard. |
+| POST   | `/tenant/{slug}/services/people/{sm_id}/welcome` | service administrator OR org admin/leader | Generate a temp password (if member has none) + mark `welcomed_at`. Returns temp password ONCE |
+
+### Role enum
+
+`service_role`  →  `administrator | editor | coordinator | viewer | scheduled_viewer`
+
+| Role | Permissions in Servicios |
+|------|--------------------------|
+| `administrator` | Full control — add/edit/delete people, types, plans |
+| `editor` | Edit services, types, plans. **No delete people**, **no add people** |
+| `coordinator` | Coordinate plans within a type. **No add/modify types**, can manage (not delete) plans |
+| `viewer` | Read-only across all services |
+| `scheduled_viewer` | Read-only of *assigned* services only |
+
+`songs_role` and `media_role` use the same enum **without** `coordinator`:
+`administrator | editor | viewer | scheduled_viewer`
+
+### POST /tenant/{slug}/services/people — Request body
+
+Either `member_id` (existing org member) **or** `new_member` (create new):
+
+```json
+{
+  "member_id": "<uuid>",
+  "service_role": "editor",
+  "songs_role": "viewer",
+  "media_role": "viewer",
+  "file_access": { "plans": true, "songs": true, "media": false },
+  "type_permissions": [
+    { "service_type_id": "<uuid>", "role": null },
+    { "service_type_id": "<uuid>", "role": "administrator" }
+  ],
+  "send_welcome": true
+}
+```
+
+```json
+{
+  "new_member": {
+    "full_name": "Jorge Perez",
+    "email": "jorge@iglesia.com",
+    "phone": "+34 612 345 678"
+  },
+  "service_role": "viewer",
+  "songs_role": "viewer", "media_role": "viewer",
+  "file_access": { "plans": true, "songs": true, "media": true },
+  "type_permissions": [],
+  "send_welcome": true
+}
+```
+
+Notes:
+- `type_permissions[].role`: `null` means **same as parent** (inherit from `service_role`). Absent entries also inherit.
+- `send_welcome: true`: if the member has no `hashed_password`, generates a 12-char temp password and stores it hashed. `welcomed_at` is stamped. The plaintext is returned **once** in the response as `temp_password` — admin shares manually until SMTP is wired.
+- **Org admins are skipped**: if the resolved `OrgMember.role == 'admin'`, the server silently ignores `send_welcome` (no password gen, no `welcomed_at`). The dedicated `POST .../welcome` endpoint returns `400` for the same reason — admins already authenticate with their tenant-level password.
+
+### ⚠ TEST-ONLY: `debug_password` field + reset-password endpoint
+
+For local QA the server temporarily stores the plaintext of every generated password in `service_members.debug_password` and exposes it both in the list response and via a force-reset endpoint. **Remove before going to production** — see `CONTEXT.md → "Para quitar antes de producción"` for the full checklist.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/tenant/{slug}/services/people/{sm_id}/reset-password` | TEST-ONLY. Force-regenerates a member's password, stores plaintext in `debug_password`, updates the bcrypt hash on `org_members.hashed_password`, and stamps `welcomed_at`. Returns `{ id, email, debug_password }`. Rejects (400) for `org_role == 'admin'`. |
+
+The GET list response includes `debug_password` (may be `null` for entries created before the column existed or for org admins).
+
+### Response
+
+```json
+{
+  "id": "<service_member uuid>",
+  "member_id": "<org_member uuid>",
+  "full_name": "Jorge Perez", "email": "jorge@iglesia.com", "avatar": null,
+  "org_role": "member",
+  "service_role": "viewer",
+  "songs_role": "viewer", "media_role": "viewer",
+  "file_access": { "plans": true, "songs": true, "media": true },
+  "type_permissions": [
+    { "service_type_id": "<uuid>", "role": null }
+  ],
+  "welcomed_at": "2026-05-22T20:00:00+00:00",
+  "password_set": true,
+  "created_at": "2026-05-22T20:00:00+00:00",
+  "temp_password": "Ab12CdEf34Gh"
+}
+```
+
+### Errors
+
+| Code | Detail |
+|------|--------|
+| 400  | Email inválido · Nombre requerido · service_role inválido · songs_role inválido · media_role inválido · Indica member_id o new_member |
+| 401  | No autenticado · Token inválido · Miembro no encontrado |
+| 403  | Sin acceso al módulo de Servicios · Solo administradores |
+| 404  | Persona no encontrada · Org no encontrada |
+| 409  | Esta persona ya pertenece a Servicios · Ese email ya existe en la organización |
+
+### Sidebar / module access (impact on `/tenant/{slug}/auth/me`)
+
+`GET /tenant/{slug}/auth/me` now returns two additional fields used by the
+frontend to filter the module dropdown:
+
+```json
+{
+  "...": "...existing fields...",
+  "accessible_modules": ["servicios", "perfil"],
+  "service_role": "viewer"
+}
+```
+
+Resolution rules:
+- Org admin / leader → all modules.
+- Else if `service_members` row exists for this member → `["servicios","perfil"]` + `service_role` = the row's value.
+- Else → `["perfil"]` only.
+- Impersonation token → all modules + `service_role: administrator`.
+
+The frontend redirects (`replace`) to the first accessible module when the URL targets one that is forbidden.
+
+---
+
+## Tenant · Teams
+
+A Team groups org_members for service assignments (Adoración, Audio/Visual, Recibo, Desayunos, etc.). Linked to ServiceType via `service_teams` M2M. Same auth/role rules as Services.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/tenant/{slug}/teams` | JWT or cookie | List teams + `member_count` |
+| POST   | `/tenant/{slug}/teams` | admin/leader | Create team |
+| PATCH  | `/tenant/{slug}/teams/{team_id}` | admin/leader | Update team (name, color, description) |
+| DELETE | `/tenant/{slug}/teams/{team_id}` | admin/leader | Cascade-deletes memberships + service_teams links |
+| GET    | `/tenant/{slug}/teams/{team_id}/members` | JWT or cookie | List memberships (joins `org_members` for name/email) |
+| POST   | `/tenant/{slug}/teams/{team_id}/members` | admin/leader | Add a member to the team — body: `{ member_id, role? }` |
+| DELETE | `/tenant/{slug}/teams/{team_id}/members/{member_id}` | admin/leader | Remove member from team |
+
+### POST /tenant/{slug}/teams — Request body
+
+```json
+{
+  "name": "Equipo de Adoración",
+  "color": "#4F46E5",
+  "description": "Cantantes, instrumentistas, dirección musical"
+}
+```
+
+### Response
+
+```json
+{
+  "id": "uuid",
+  "name": "Equipo de Adoración",
+  "color": "#4F46E5",
+  "description": "...",
+  "member_count": 0
+}
+```
+
+### Errors
+
+| Code | Detail |
+|------|--------|
+| 400  | Nombre requerido · member_id inválido |
+| 401  | No autenticado · Token inválido · Miembro no encontrado |
+| 403  | Solo administradores y líderes |
+| 404  | Equipo no encontrado · Miembro no encontrado · Pertenencia no encontrada |
+| 409  | Ya está en el equipo |
+
+---
+
 ## Settings
 
 ### GET /admin/settings/database
