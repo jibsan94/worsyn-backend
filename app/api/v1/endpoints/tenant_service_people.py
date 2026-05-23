@@ -31,6 +31,7 @@ from app.core.security import decode_token, hash_password
 from app.db.session import get_db
 from app.models.models import (
     Organization, OrgMember, ServiceMember, ServiceMemberTypePerm, ServiceType,
+    Team, TeamMembership,
 )
 
 router = APIRouter(prefix="/tenant/{slug}/services/people", tags=["Tenant · Service People"])
@@ -119,6 +120,10 @@ async def _serialize(sm: ServiceMember, om: OrgMember, db: AsyncSession) -> dict
         "welcomed_at": sm.welcomed_at.isoformat() if sm.welcomed_at else None,
         "password_set": sm.password_set_at is not None or bool(om.hashed_password),
         "created_at": sm.created_at.isoformat(),
+        "scheduling": {
+            "max_per_month": sm.scheduling_max_per_month,  # null = unlimited
+            "max_per_day": sm.scheduling_max_per_day,      # null = unlimited
+        },
         # TEST-ONLY — plaintext password stored for local QA. Remove before prod.
         "debug_password": sm.debug_password,
     }
@@ -315,6 +320,20 @@ async def update_service_person(
         if "songs" in fa: sm.file_access_songs = bool(fa["songs"])
         if "media" in fa: sm.file_access_media = bool(fa["media"])
 
+    if "scheduling" in body and isinstance(body["scheduling"], dict):
+        sc = body["scheduling"]
+        def _cap(v: object) -> int | None:
+            if v is None or v == "" or v == 0:
+                return None
+            n = int(v)
+            if n < 1 or n > 31:
+                raise HTTPException(status_code=400, detail="scheduling cap fuera de rango (1–31 o null)")
+            return n
+        if "max_per_month" in sc:
+            sm.scheduling_max_per_month = _cap(sc["max_per_month"])
+        if "max_per_day" in sc:
+            sm.scheduling_max_per_day = _cap(sc["max_per_day"])
+
     if "type_permissions" in body and isinstance(body["type_permissions"], list):
         existing = (await db.execute(
             select(ServiceMemberTypePerm).where(ServiceMemberTypePerm.service_member_id == sm.id)
@@ -457,3 +476,42 @@ async def reset_password_debug(
     sm.welcomed_at = datetime.now(timezone.utc)
     await db.flush()
     return {"id": str(sm.id), "email": om.email, "debug_password": new_pw}
+
+
+# ── Teams membership (convenience join) ───────────────────────────────────────
+@router.get("/{sm_id}/teams")
+async def list_person_teams(
+    slug: str, sm_id: str,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the teams this person belongs to. Joins team_memberships → teams
+    via `org_members.id` (= ServiceMember.member_id).
+    """
+    org, caller, org_role, svc_role = await _auth(slug, authorization, tenant_access, db)
+    if not (org_role in ("admin", "leader") or svc_role is not None):
+        raise HTTPException(status_code=403, detail="Sin acceso")
+    try:
+        smu = uuid.UUID(sm_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+    sm = (await db.execute(
+        select(ServiceMember).where(ServiceMember.id == smu, ServiceMember.org_id == org.id)
+    )).scalar_one_or_none()
+    if sm is None:
+        raise HTTPException(status_code=404, detail="Persona no encontrada")
+    rows = (await db.execute(
+        select(TeamMembership, Team)
+        .join(Team, Team.id == TeamMembership.team_id)
+        .where(TeamMembership.member_id == sm.member_id, Team.org_id == org.id)
+        .order_by(Team.name)
+    )).all()
+    return [
+        {
+            "membership_id": str(tm.id),
+            "team_id": str(t.id), "team_name": t.name, "team_color": t.color,
+            "role": tm.role,
+        }
+        for tm, t in rows
+    ]

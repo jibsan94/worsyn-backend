@@ -1,8 +1,169 @@
 # Worsyn API Documentation
 
-**Base URL:** `http://<host>:8000/api/v1`  
-**Auth:** Bearer JWT (`Authorization: Bearer <access_token>`)  
+**Base URL:** `http://<host>:8000/api/v1`
+**OpenAPI spec:** `GET /api/openapi.json` · **Swagger UI:** `GET /api/docs`
+**Auth:** Bearer JWT (`Authorization: Bearer <access_token>`)
 **Content-Type:** `application/json` (except `/auth/login` → `application/x-www-form-urlencoded`)
+
+---
+
+## 📱 Mobile / Desktop Integration Guide (Phase 3 / 4)
+
+This API is the **single source of truth** for every Worsyn surface: the admin web panel (this repo), the upcoming mobile apps (iOS + Android, Phase 3), and the desktop client (Electron or native, Phase 4). Every public endpoint below works equally well via web cookies **or** Bearer header — native clients must use the Bearer flow.
+
+### 1. Two API surfaces
+
+| Surface | Base path | Audience |
+|---------|-----------|----------|
+| **Platform / Admin** | `/api/v1/admin/*`, `/api/v1/organizations/*`, `/api/v1/auth/*` | Internal Worsyn operators only — `system_users` table. Not exposed to mobile apps. |
+| **Tenant Portal**    | `/api/v1/tenant/*`, `/api/v1/tenant/{slug}/*` | All church members. **This is the API every mobile/desktop client consumes.** |
+
+A tenant-side `OrgMember` cannot authenticate against the platform API and vice-versa. The tokens are different types (`access` for admins vs `tenant_access` / `org_select` for tenant) and the server rejects mismatches with 401.
+
+### 2. Versioning & lifecycle
+
+- Path prefix `v1` — never breaking changes. Additive only.
+- Each tenant endpoint emits a stable JSON shape with `id` as a UUID string and all timestamps as ISO 8601 UTC (`2026-05-23T10:00:00+00:00`).
+- Deprecations announced 90 days before removal via a `Deprecation` header — clients should log it.
+- Future `v2` will live at `/api/v2/*` in parallel.
+
+### 3. Auth flow for native apps (mobile + desktop)
+
+Cookies are **not** usable from native clients. Every native client must use the Bearer header.
+
+```
+1. POST   /api/v1/tenant/auth/login           { email, password }
+   → 200  { partial_token, orgs: [{slug, name, icon}] }
+        (partial_token is a JWT of type 'org_select', 10-min expiry)
+
+2. POST   /api/v1/tenant/auth/select          { partial_token, slug }
+   → 200  { access_token, refresh_token?, member: {...} }
+
+3. Every subsequent call:
+   Authorization: Bearer <access_token>
+
+4. When the server returns 401:
+   • Refresh via /api/v1/tenant/auth/refresh (Phase 3 — pending) OR
+   • Re-login (steps 1+2)
+```
+
+The `access_token` is a JWT of type `tenant_access`. Payload (read-only):
+
+```json
+{
+  "sub": "<org_member uuid>",
+  "type": "tenant_access",
+  "org_id": "<uuid>",
+  "org_slug": "iglesia-x",
+  "exp": 1748000000,
+  "impersonating": false
+}
+```
+
+It does **not** carry the org role, the service role or the list of accessible modules. Always fetch those from `GET /tenant/{slug}/auth/me` after authentication — see §6 below.
+
+### 4. Standard error envelope
+
+All errors return JSON with a single `detail` string (FastAPI default):
+
+```json
+{ "detail": "Solo administradores pueden eliminar personas" }
+```
+
+For validation errors (Pydantic) the envelope is `{ "detail": [{ "loc": [...], "msg": "...", "type": "..." }] }`. Clients should display either form.
+
+| Status | Meaning |
+|--------|---------|
+| 200    | OK |
+| 201    | Created |
+| 204    | No Content (typically DELETE) |
+| 400    | Bad request — malformed body, invalid date, invalid enum |
+| 401    | No autenticado · Token inválido · Sesión inválida |
+| 403    | Permiso insuficiente (rol) |
+| 404    | Recurso no encontrado |
+| 409    | Conflicto (duplicado: email, slug, etc.) |
+| 422    | Pydantic validation error |
+| 500    | Bug del servidor — reportar |
+
+### 5. JSON & data conventions
+
+- IDs: **UUID v4 as string** — never integers.
+- Timestamps: **ISO 8601** with timezone (`2026-05-23T10:00:00+00:00`). Dates: `YYYY-MM-DD`. Times: `HH:MM`.
+- Money: stored as **integer cents** with explicit `currency` (e.g. `amount_cents: 12345, currency: "EUR"`).
+- Avatars & small files: **base64 data URLs** (member avatar ≤ 3 MB, org icon ≤ 1 MB).
+- Large files (member attachments): **multipart/form-data**, capped at 10 MB. Returned base64 only on explicit `/data` endpoint.
+- Booleans, never `0/1`. Enums, never untyped strings — every enum is documented per-endpoint.
+- Empty lists return `[]`, never `null`. Missing optional fields return `null`.
+
+### 6. Module access — `GET /tenant/{slug}/auth/me`
+
+Mobile clients use this to know which modules to render. The response includes:
+
+```json
+{
+  "id": "...", "email": "...", "full_name": "...", "role": "admin|leader|member",
+  "org_id": "...", "org_name": "...", "org_slug": "...", "avatar": null,
+  "accessible_modules": ["servicios", "miembros", "..."],
+  "service_role": "administrator|editor|coordinator|viewer|scheduled_viewer|null",
+  "impersonating": false
+}
+```
+
+Resolution rules: org admin/leader → all modules. Org member with `service_members` row → `["servicios","perfil"]`. Otherwise → `["perfil"]`. Impersonation → all modules.
+
+### 7. File uploads (member attachments)
+
+```
+POST /api/v1/tenant/{slug}/members/{member_id}/attachments
+Content-Type: multipart/form-data
+fields:
+  file:  <binary>     (max 10 MB)
+  label: "Pasaporte"  (string)
+```
+
+Returns `{ id, label, original_name, mime_type, size_bytes, uploaded_at }`. The bytes themselves are fetched separately via `GET .../attachments/{id}/data`, which returns a base64-encoded `file_data` field plus `mime_type` so the client can build a `data:<mime>;base64,<data>` URL for preview/download.
+
+### 8. Real-time & notifications (Phase 3+)
+
+- **WebSocket**: not yet implemented. Planned at `/api/v1/tenant/{slug}/ws` for plan updates, attendance ticks, blockout sync.
+- **Push notifications**: planned via Apple APNs + Firebase FCM. The tokens will be registered via `POST /tenant/{slug}/auth/devices` (not yet implemented).
+- **Polling**: until those land, mobile apps can safely poll `/auth/me`, `/services/people`, `/services/occurrences` every 60–300 s.
+
+### 9. Pagination & filtering (current state)
+
+Most listing endpoints currently return the full collection (typically ≤ a few hundred rows per org). Phase 3 will introduce `?cursor=&limit=` query params on:
+
+- `GET /tenant/{slug}/members`
+- `GET /tenant/{slug}/services/plans`
+- `GET /tenant/{slug}/songs`
+- `GET /tenant/{slug}/media`
+- `GET /tenant/{slug}/finance/transactions`
+
+Until then, clients should assume "small enough to fetch fully".
+
+### 10. Endpoint index (tenant portal)
+
+| Module | Path prefix | State | CRUD |
+|--------|-------------|-------|------|
+| Auth (unified)       | `/tenant/auth/*`                         | Stable    | login, select, switch-options |
+| Auth (per-slug)      | `/tenant/{slug}/auth/*`                  | Stable    | login, me, profile, logout, switch-options |
+| Settings (org)       | `/tenant/{slug}/settings`                | Stable    | GET, PATCH |
+| Members              | `/tenant/{slug}/members`                 | Stable    | GET, POST, PUT, DELETE + attachments CRUD |
+| Services · Types     | `/tenant/{slug}/services/types`          | Stable    | GET, POST, PATCH, DELETE |
+| Services · Plans     | `/tenant/{slug}/services/plans`          | Stable    | GET, POST |
+| Services · Occurrences | `/tenant/{slug}/services/occurrences` | Stable    | GET (projection) |
+| Services · People    | `/tenant/{slug}/services/people`         | Stable    | GET, POST, PATCH, DELETE + welcome + reset-password (test) |
+| Services · Blockouts | `/tenant/{slug}/services/people/{id}/blockouts` | Stable | GET, POST, PATCH, DELETE |
+| Teams                | `/tenant/{slug}/teams`                   | Stable    | GET, POST, PATCH, DELETE + memberships |
+| Songs                | `/tenant/{slug}/songs`                   | **Stub**  | GET only (POST/PATCH/DELETE pending — Phase 3) |
+| Media                | `/tenant/{slug}/media`                   | **Stub**  | GET only |
+| Scores               | `/tenant/{slug}/scores`                  | **Stub**  | GET only |
+| Events               | `/tenant/{slug}/events`                  | **Stub**  | GET only |
+| Rehearsals           | `/tenant/{slug}/rehearsals`              | **Stub**  | GET only |
+| Calendar             | `/tenant/{slug}/calendar`                | **Stub**  | GET unified feed (events + rehearsals + plans) |
+| Finance              | `/tenant/{slug}/finance/*`               | **Stub**  | GET transactions + summary |
+
+**Stub** = read-only; write endpoints will land as each module's UI is built. Mobile/desktop clients can already list these resources but cannot mutate them yet.
 
 ---
 
@@ -1014,6 +1175,89 @@ Notes:
 - `send_welcome: true`: if the member has no `hashed_password`, generates a 12-char temp password and stores it hashed. `welcomed_at` is stamped. The plaintext is returned **once** in the response as `temp_password` — admin shares manually until SMTP is wired.
 - **Org admins are skipped**: if the resolved `OrgMember.role == 'admin'`, the server silently ignores `send_welcome` (no password gen, no `welcomed_at`). The dedicated `POST .../welcome` endpoint returns `400` for the same reason — admins already authenticate with their tenant-level password.
 
+### Scheduling preferences (caps for the Phase-3 scheduler)
+
+`ServiceMember` carries two soft caps consumed by the future cuadrante / scheduler:
+
+| Field | Type | Default | Meaning |
+|-------|------|---------|---------|
+| `scheduling.max_per_month` | `int \| null` | `null` (unlimited) | Max number of plans this person can be scheduled into per calendar month |
+| `scheduling.max_per_day`   | `int \| null` | `null` (unlimited) | Max plans per day — useful when a church runs 2–4 services the same Sunday |
+
+Update via `PATCH /tenant/{slug}/services/people/{sm_id}` body:
+
+```json
+{ "scheduling": { "max_per_month": 1, "max_per_day": 1 } }
+```
+
+Either value can be omitted (no change), `null`, `0`, or `""` (all interpreted as "unlimited"). Range is 1–31. The list/get response always includes `"scheduling": { "max_per_month": ..., "max_per_day": ... }`.
+
+### Teams of a person
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/tenant/{slug}/services/people/{sm_id}/teams` | Teams this person belongs to (joins `team_memberships` → `teams` via `org_members.id`) |
+
+Returns `[ { membership_id, team_id, team_name, team_color, role } ]`. To add/remove use the existing `/tenant/{slug}/teams/{team_id}/members` endpoints with `member_id` = the person's `member_id` (not their service_member id).
+
+### Person blockouts (unavailability)
+
+Per-ServiceMember unavailability ranges with optional recurrence. All endpoints scoped to a person.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/tenant/{slug}/services/people/{sm_id}/blockouts` | JWT or cookie (any member) | List blockouts ordered by `start_date DESC` |
+| POST   | `/tenant/{slug}/services/people/{sm_id}/blockouts` | admin/leader/coordinator OR self | Create blockout |
+| PATCH  | `/tenant/{slug}/services/people/{sm_id}/blockouts/{blockout_id}` | admin/leader/coordinator OR self | Update blockout |
+| DELETE | `/tenant/{slug}/services/people/{sm_id}/blockouts/{blockout_id}` | admin/leader/coordinator OR self | Delete blockout |
+
+#### Recurrence
+
+`repeat_kind` ∈ `none | day | week | month | year` · `repeat_interval` 1–12 (`Cada`, `Cada dos`, …) · `repeat_until` ISO date or `null` (forever).
+
+#### POST/PATCH body
+
+```json
+{
+  "start_date": "2026-05-31",
+  "end_date": "2026-06-02",
+  "all_day": true,
+  "repeat_kind": "week",
+  "repeat_interval": 2,
+  "repeat_until": "2026-08-31",
+  "reason": "Vacaciones"
+}
+```
+
+`end_date` defaults to `start_date` when omitted. For `repeat_kind: "none"`, the server forces `repeat_interval=1` and `repeat_until=null`.
+
+#### Response
+
+```json
+{
+  "id": "uuid",
+  "start_date": "2026-05-31",
+  "end_date": "2026-06-02",
+  "all_day": true,
+  "repeat_kind": "week",
+  "repeat_interval": 2,
+  "repeat_until": "2026-08-31",
+  "reason": "Vacaciones",
+  "created_at": "2026-05-23T10:00:00+00:00"
+}
+```
+
+#### Errors
+
+| Code | Detail |
+|------|--------|
+| 400  | Fecha inválida · `end_date < start_date` · `repeat_kind` inválido · `repeat_interval` fuera de rango (1–12) · `repeat_until` < `start_date` |
+| 401  | No autenticado · Token inválido |
+| 403  | Sin permiso para editar bloqueos |
+| 404  | Persona no encontrada · Bloqueo no encontrado |
+
+---
+
 ### ⚠ TEST-ONLY: `debug_password` field + reset-password endpoint
 
 For local QA the server temporarily stores the plaintext of every generated password in `service_members.debug_password` and exposes it both in the list response and via a force-reset endpoint. **Remove before going to production** — see `CONTEXT.md → "Para quitar antes de producción"` for the full checklist.
@@ -1123,6 +1367,178 @@ A Team groups org_members for service assignments (Adoración, Audio/Visual, Rec
 | 403  | Solo administradores y líderes |
 | 404  | Equipo no encontrado · Miembro no encontrado · Pertenencia no encontrada |
 | 409  | Ya está en el equipo |
+
+---
+
+## Tenant · Songs (stub — read-only, Phase 3)
+
+Song library (lyrics, chords, metadata). Schema-stable, full CRUD pending.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/tenant/{slug}/songs` | List songs ordered by title |
+
+### Response
+
+```json
+[
+  { "id": "uuid", "title": "Aleluya", "author": "Anónimo", "key": "G", "tempo": 84, "ccli": null, "tags": ["adoración"] }
+]
+```
+
+### Planned (Phase 3)
+
+`POST`, `PATCH`, `DELETE` for `/songs`; `GET /songs/{id}` returning full lyrics + chords (JSON), audio refs (`media_id`), and `arrangements[]`; bulk import via ChordPro.
+
+---
+
+## Tenant · Media (stub — read-only)
+
+Media assets (image, video, audio, doc). Currently external `url`; upload pipeline + base64 path pending.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/tenant/{slug}/media` | List media ordered by `uploaded_at DESC` |
+
+### Response
+
+```json
+[
+  { "id": "uuid", "name": "Portada Domingo", "kind": "image", "url": "https://...", "size_bytes": 124000, "mime": "image/jpeg", "uploaded_at": "..." }
+]
+```
+
+`kind` ∈ `image | video | audio | doc`.
+
+### Planned (Phase 3)
+
+`POST` multipart upload (with S3 or local-disk backend), `DELETE`, signed download URLs, thumbnails.
+
+---
+
+## Tenant · Scores (stub — read-only)
+
+Sheet music per instrument, optionally linked to a `song_id`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/tenant/{slug}/scores` | List scores ordered by title |
+
+### Response
+
+```json
+[
+  { "id": "uuid", "title": "Cuán Grande es Él (Piano)", "key": "C", "instrument": "piano", "file_url": "https://...", "song_id": "uuid" }
+]
+```
+
+### Planned (Phase 3)
+
+`POST`/`DELETE`, PDF upload, transpose helper endpoint, per-instrument filtering.
+
+---
+
+## Tenant · Events (stub — read-only)
+
+One-off events (camps, retreats, conferences). Distinct from recurring `service_plans`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/tenant/{slug}/events` | List events ordered by `starts_at DESC NULLS LAST` |
+
+### Response
+
+```json
+[
+  { "id": "uuid", "name": "Retiro de Jóvenes", "location": "Sierra de Madrid",
+    "starts_at": "2026-07-15T08:00:00+00:00", "ends_at": "2026-07-17T18:00:00+00:00",
+    "description": "Tres días de comunión" }
+]
+```
+
+### Planned (Phase 3)
+
+CRUD, RSVP endpoint, registrations, cost tracking via Finance.
+
+---
+
+## Tenant · Rehearsals (stub — read-only)
+
+Practice sessions, optionally linked to a `service_plan_id`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/tenant/{slug}/rehearsals` | List rehearsals ordered by `scheduled_at DESC NULLS LAST` |
+
+### Response
+
+```json
+[
+  { "id": "uuid", "location": "Sala principal", "notes": "Repasar coros",
+    "scheduled_at": "2026-05-30T19:00:00+00:00", "service_plan_id": "uuid-or-null" }
+]
+```
+
+### Planned (Phase 3)
+
+CRUD + attendance + reminders.
+
+---
+
+## Tenant · Calendar (stub — unified read-only feed)
+
+Composes events + rehearsals + service plans into one feed for calendar UIs. Does not own a table.
+
+| Method | Path | Query | Description |
+|--------|------|-------|-------------|
+| GET    | `/tenant/{slug}/calendar` | `from`, `to` (ISO 8601 datetime, optional) | Unified feed |
+
+### Response
+
+Each item carries a `kind` discriminator:
+
+```json
+[
+  { "kind": "event",   "id": "uuid", "title": "Retiro de Jóvenes", "starts_at": "...", "ends_at": "...", "location": "...", "description": "..." },
+  { "kind": "rehearsal", "id": "uuid", "title": "Ensayo Equipo Alabanza", "scheduled_at": "...", "location": "...", "service_plan_id": "uuid" },
+  { "kind": "plan",    "id": "uuid", "title": "Servicio Dominical 31 mayo", "scheduled_at": "...", "service_type_id": "uuid", "status": "draft" }
+]
+```
+
+Mobile/desktop clients should sort and group client-side. Service occurrences from the `services` module are **not** included here — use `GET /tenant/{slug}/services/occurrences` for the recurring projection. Phase 3 will merge both feeds.
+
+---
+
+## Tenant · Finance (stub — read-only)
+
+Income / expense ledger for the org. Stored as integer cents.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/tenant/{slug}/finance/transactions` | List transactions ordered by `occurred_on DESC NULLS LAST` |
+| GET    | `/tenant/{slug}/finance/summary` | Monthly aggregates (sum by `kind`) |
+
+### Transactions response
+
+```json
+[
+  { "id": "uuid", "amount_cents": 12500, "currency": "EUR",
+    "kind": "tithe", "description": "Diezmo dominical",
+    "category": "diezmos", "occurred_on": "2026-05-17" }
+]
+```
+
+`kind` ∈ `income | expense | tithe | offering`.
+
+### Summary response
+
+```json
+{ "totals_by_kind": { "tithe": 250000, "offering": 80000, "expense": 145000 }, "currency": "EUR" }
+```
+
+### Planned (Phase 3)
+
+CRUD, monthly reports, CSV/PDF export, integration with payment gateways (Stripe / Bizum).
 
 ---
 

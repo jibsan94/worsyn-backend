@@ -143,11 +143,20 @@ service_members      — permisos del módulo Servicios por miembro
   songs_role    (administrator|editor|viewer|scheduled_viewer  nullable),
   media_role    (administrator|editor|viewer|scheduled_viewer  nullable),
   file_access_plans BOOL, file_access_songs BOOL, file_access_media BOOL,
+  scheduling_max_per_month INT NULL (NULL = sin límite, 1..31),
+  scheduling_max_per_day   INT NULL (NULL = sin límite, 1..31),
   welcomed_at (ts nullable), password_set_at (ts nullable),
   created_at, updated_at
 service_member_type_perms — override por tipo de servicio (Same-as-parent)
   id, service_member_id (FK CASCADE), service_type_id (FK CASCADE),
   role (str nullable — NULL = heredar)
+service_member_blockouts — periodos de indisponibilidad por persona
+  id, org_id (FK CASCADE), service_member_id (FK CASCADE),
+  start_date (DATE), end_date (DATE), all_day BOOL,
+  repeat_kind (none|day|week|month|year), repeat_interval INT 1..12,
+  repeat_until (DATE nullable — NULL = siempre),
+  reason (TEXT nullable), created_at, updated_at
+  Proyección de recurrencia: cliente (frontend) calcula próximas ocurrencias
 service_plans        — instancia concreta (un domingo específico, etc.)
   id, org_id (FK CASCADE), service_type_id (FK→service_types SET NULL),
   title, scheduled_at, status (draft|published|completed), notes

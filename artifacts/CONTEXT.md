@@ -203,6 +203,20 @@ Cuando `must_change_password: true`:
 - [x] Filtro de sidebar por permisos: `GET /tenant/{slug}/auth/me` devuelve `accessible_modules` + `service_role`. Miembros sin rol de org pero con entrada en `service_members` solo ven Servicios + Perfil. Frontend redirige automáticamente fuera de módulos prohibidos
 - [x] Editor no puede añadir ni eliminar personas — solo Administrador (a nivel servicio) o admin/leader de org pueden gestionar la lista
 - [x] Per-service-type permission overrides ("Mismo que arriba" / rol específico) via `service_member_type_perms`
+- [x] **Vista de detalle de persona** (Servicios → Personas → clic en fila): cabecera con avatar + nombre + email + rol + acciones; tabs **Programación · Comunicación · Detalles**
+- [x] **Bloqueos de indisponibilidad** — tabla `service_member_blockouts` + endpoints CRUD bajo `/services/people/{sm_id}/blockouts`. Soporta rango de fechas + recurrencia (`Cada N día/semana/mes/año`, `siempre` o `hasta fecha`) + motivo opcional
+- [x] Modal de bloqueo con calendario mensual (clic = inicio; segundo clic = fin del rango), formulario de repetición traducido al español ("Cada", "Cada dos"…) y switch siempre/hasta fecha
+- [x] Programación: secciones **Calendario** (bloqueos), **Preferencias** (stub), **Equipos asignados** (stub)
+- [x] Comunicación (stub): Mensajes (Recibidos/Enviados) · Contraseña (reset email — SMTP pendiente) · Notificaciones (App preferida) · Firma
+- [x] Detalles (stub): Etiquetas · Notas · Archivos (drag&drop) · Carpeta actual · Actividad (último acceso + creación)
+- [x] Permisos de edición de bloqueos: admin/leader/coordinator OR la persona sobre sí misma (self-edit)
+- [x] **Mobile/Desktop integration guide** completa en `API-DOCS.md` §1–§10 (auth Bearer para apps nativas, conventions JSON, errores, índice de endpoints con estado Stable/Stub)
+- [x] Documentación de stubs read-only (songs, media, scores, events, rehearsals, calendar, finance) — list endpoints + payload + planned Phase-3 work
+- [x] Tenant portal **responsive** (≤900 px tablet / ≤640 px móvil) — `<style>` global inyectado en `TenantPortal.tsx` con queries que apuntan a `data-tp="..."` (topbar, sidebar, main, content, table-wrap, detail-header/grid, tab-strip, modales). Login card + person detail + tablas y calendarios reaccionan sin refactor de estilos inline
+- [x] App nativa (Fase 3/4): autenticación 100% Bearer (`POST /tenant/auth/login` → `partial_token` → `POST /tenant/auth/select` → `access_token`). Módulos visibles se piden a `/auth/me` (no se decodifica el JWT)
+- [x] **Preferencias de agendado**: `service_members.scheduling_max_per_month` + `scheduling_max_per_day` (INT nullable, NULL = sin límite). UI editable en PersonDetail → Programación → Preferencias (dropdowns "Sin límite" / "Hasta N"). Consumido por el generador de cuadrantes en Fase 3
+- [x] **Equipos por persona**: endpoint `GET /tenant/{slug}/services/people/{sm_id}/teams` (join `team_memberships` + `teams`). UI en PersonDetail → Programación → Equipos con picker (selecciona equipo + rol opcional) y botón × para quitar. Alta/baja vía endpoints existentes `/teams/{id}/members`
+- [x] **BlockoutModal mejoras**: botón "Hoy" (vuelve al mes actual + selecciona hoy) y resaltado del día actual (borde + fondo azul claro)
 
 ## Roles de OrgMember
 

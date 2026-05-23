@@ -63,6 +63,28 @@ async def _members_count(team_id: uuid.UUID, db: AsyncSession) -> int:
     return len(rows)
 
 
+# Default teams every org starts with. Seeded the first time `list_teams` is
+# called for an org with zero rows. Once any team exists, this helper is a
+# no-op — so if an admin deletes a default team it stays deleted.
+DEFAULT_TEAMS: list[tuple[str, str]] = [
+    ("Grupo de Alabanza", "#4F46E5"),
+    ("Audio/Visual",      "#EF4444"),
+    ("Predicadores",      "#10B981"),
+    ("Recibo y Orden",    "#F59E0B"),
+]
+
+
+async def _autoseed_defaults(org_id: uuid.UUID, db: AsyncSession) -> None:
+    existing = (await db.execute(
+        select(Team).where(Team.org_id == org_id).limit(1)
+    )).scalar_one_or_none()
+    if existing is not None:
+        return
+    for name, color in DEFAULT_TEAMS:
+        db.add(Team(org_id=org_id, name=name, color=color))
+    await db.flush()
+
+
 @router.get("")
 async def list_teams(
     slug: str,
@@ -71,6 +93,7 @@ async def list_teams(
     db: AsyncSession = Depends(get_db),
 ):
     org, _ = await _auth(slug, authorization, tenant_access, db)
+    await _autoseed_defaults(org.id, db)
     rows = (await db.execute(
         select(Team).where(Team.org_id == org.id).order_by(Team.name)
     )).scalars().all()

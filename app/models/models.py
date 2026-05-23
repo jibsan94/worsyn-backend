@@ -381,8 +381,45 @@ class ServiceMember(Base):
     file_access_media: Mapped[bool] = mapped_column(Boolean, default=True)
     welcomed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     password_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Scheduling preferences — soft caps consumed by the Phase-3 scheduler/cuadrante
+    # NULL = unlimited (default). Integers 1..N = upper bound.
+    # Example: a member who can serve once a month even if the church has 4
+    # services on Sundays → scheduling_max_per_month=1, scheduling_max_per_day=1.
+    scheduling_max_per_month: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    scheduling_max_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # TEST-ONLY plaintext debug field — see /artifacts/CONTEXT.md "Para quitar antes de producción"
     debug_password: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ServiceMemberBlockout(Base):
+    """Unavailability range for a ServiceMember (won't be scheduled on these days).
+
+    `start_date` and `end_date` define the inclusive range (single-day blockouts
+    have start == end). `all_day=False` is reserved for future hour-range support.
+
+    Recurrence:
+      repeat_kind     none | day | week | month | year   (none = one-off)
+      repeat_interval 1..N   (Cada / Cada dos / Cada tres … → 1, 2, 3 …)
+      repeat_until    DATE | NULL                        (NULL = forever)
+
+    `reason` is optional. Projection of recurring blockouts onto a calendar
+    range happens on the frontend (small enough scope) or could move to a
+    dedicated endpoint later.
+    """
+    __tablename__ = "service_member_blockouts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    service_member_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_members.id", ondelete="CASCADE"), nullable=False, index=True)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    all_day: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    repeat_kind: Mapped[str] = mapped_column(String(10), default="none", nullable=False)
+    repeat_interval: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    repeat_until: Mapped[date | None] = mapped_column(Date, nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
