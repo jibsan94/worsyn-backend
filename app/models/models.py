@@ -35,6 +35,8 @@ class Organization(Base):
     member_roles: Mapped[list] = mapped_column(JSON, default=list)
     icon: Mapped[str | None] = mapped_column(Text, nullable=True)
     require_2fa_admins: Mapped[bool] = mapped_column(Boolean, default=False)
+    # How long received/sent email history is kept (months). Default 3, max 12 — surfaced in org settings.
+    email_retention_months: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -387,6 +389,12 @@ class ServiceMember(Base):
     # services on Sundays → scheduling_max_per_month=1, scheduling_max_per_day=1.
     scheduling_max_per_month: Mapped[int | None] = mapped_column(Integer, nullable=True)
     scheduling_max_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Email signature (used by outgoing tenant emails once SMTP is wired).
+    # `signature_image` is a base64 data URL — capped at 1 MB decoded.
+    signature_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    signature_image: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Preferred notification app: 'servicios' (default, web/mobile portal) | 'worsyn' (future)
+    preferred_notif_app: Mapped[str] = mapped_column(String(20), nullable=False, default="servicios")
     # TEST-ONLY plaintext debug field — see /artifacts/CONTEXT.md "Para quitar antes de producción"
     debug_password: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
@@ -451,3 +459,60 @@ class FinanceTransaction(Base):
     category: Mapped[str | None] = mapped_column(String(100), nullable=True)
     occurred_on: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
+
+
+# ── Email (templates + message log) ───────────────────────────────────────────
+
+class EmailTemplate(Base):
+    """Per-org reusable email body.
+
+    kind values:
+      general   → General messages (no plan context)
+      schedule  → Plan/Matrix-related (carry accept/decline buttons in render)
+      signup    → Signup Sheets emails
+      welcome   → New-member welcome
+    Body uses Worsyn variable syntax: `{{ var }}` and `{% if var %}…{% else %}…{% endif %}`.
+    See `artifacts/EMAIL-VARIABLES.md` for the full catalog.
+    """
+    __tablename__ = "email_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="general")
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("org_members.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class EmailMessage(Base):
+    """One email sent OR received within a tenant. Body is stored rendered
+    (with variables substituted) AND the raw template body kept for audit.
+
+    Retention: rows older than `organizations.email_retention_months` are
+    eligible for cleanup. The cron is not wired yet — see TODO in
+    `artifacts/CONTEXT.md` → "Para quitar antes de producción / TODOs".
+
+    direction: 'sent' | 'received'
+    status:    'queued' (SMTP not wired yet) | 'sent' | 'delivered' | 'failed' | 'received'
+    """
+    __tablename__ = "email_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    template_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("email_templates.id", ondelete="SET NULL"), nullable=True)
+    sender_member_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("org_members.id", ondelete="SET NULL"), nullable=True, index=True)
+    recipient_member_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("org_members.id", ondelete="SET NULL"), nullable=True, index=True)
+    recipient_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    sender_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False, default="sent")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
+    subject: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    body_rendered: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    body_template: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now(), index=True)

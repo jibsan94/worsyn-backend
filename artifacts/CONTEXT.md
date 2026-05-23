@@ -217,6 +217,15 @@ Cuando `must_change_password: true`:
 - [x] **Preferencias de agendado**: `service_members.scheduling_max_per_month` + `scheduling_max_per_day` (INT nullable, NULL = sin límite). UI editable en PersonDetail → Programación → Preferencias (dropdowns "Sin límite" / "Hasta N"). Consumido por el generador de cuadrantes en Fase 3
 - [x] **Equipos por persona**: endpoint `GET /tenant/{slug}/services/people/{sm_id}/teams` (join `team_memberships` + `teams`). UI en PersonDetail → Programación → Equipos con picker (selecciona equipo + rol opcional) y botón × para quitar. Alta/baja vía endpoints existentes `/teams/{id}/members`
 - [x] **BlockoutModal mejoras**: botón "Hoy" (vuelve al mes actual + selecciona hoy) y resaltado del día actual (borde + fondo azul claro)
+- [x] **Firma de email por persona** — `service_members.signature_text` (TEXT ≤16 000 chars) + `signature_image` (data URL base64, máx 1 MB decoded). Auto-editable por el propio usuario (resto de campos siguen requiriendo admin). UI en Comunicación → Firma con textarea + upload (preview + reemplazar/quitar), validación cliente (`size`/`mime`) + servidor (regex data URL + `b64decode` size). Lista para inyectarse al pie de los correos cuando SMTP esté wired (Fase 3)
+- [x] **Sistema de Email completo** — nuevas tablas `email_templates` (4 kinds: general/schedule/signup/welcome) y `email_messages` (log sent/received). Engine de variables propio (`app/services/email_render.py`) con sintaxis `{{var}}` + `{% if %}{% endif %}` (no nested). Catálogo completo de variables en `artifacts/EMAIL-VARIABLES.md` (= documentación oficial Worsyn)
+- [x] **Endpoints email**: `/tenant/{slug}/email/templates` CRUD, `/tenant/{slug}/email/messages` GET/POST (send-render-queue), `/preview` (render sin enviar), `/services/people/{sm_id}/messages` (buzón personal sent ∪ received). Permisos: send = admin/leader/coordinator/svc-editor; templates igual
+- [x] **Notificaciones (per-persona)**: `service_members.preferred_notif_app` (default `servicios`, opción `worsyn` deshabilitada). Self-editable. Preparado para Fase 3 (push notifications móvil)
+- [x] **Retención de email**: `organizations.email_retention_months` (default 3, max 12 — surfaced in UI de settings de org en Fase 3). Cron de limpieza pendiente (TODO worsyn-integrations)
+- [x] **UI Comunicación completa**: Mensajes (tabs Recibidos/Enviados con click→ver, badge En cola/Fallido) · Notificaciones dropdown · Contraseña (stub) · Firma (stub real) · Botón "+ Nuevo" abre Compose
+- [x] **Compose modal**: selector de plantilla + To: + Asunto + Cuerpo con VariablePicker en ambos campos + botón Vista previa (render server-side) + Enviar (queues sin SMTP)
+- [x] **Templates manager**: 4 tabs (General/Programación/Hojas inscripción/Bienvenida) con CRUD inline, editor con VariablePicker
+- [x] **Compatibilidad Planning Center**: `{{ to.max_plan_permissions_s }}` y `{{ from.signature }}` funcionan igual que en PCO; plantillas exportadas de PCO funcionan sin cambios
 
 ## Roles de OrgMember
 

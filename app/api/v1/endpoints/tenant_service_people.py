@@ -18,6 +18,8 @@ Access rules in this file:
   - PATCH  requires service administrator OR org admin.
   - DELETE requires service administrator OR org admin (editor cannot delete people).
 """
+import base64
+import re
 import secrets
 import string
 import uuid
@@ -38,6 +40,25 @@ router = APIRouter(prefix="/tenant/{slug}/services/people", tags=["Tenant · Ser
 
 VALID_SERVICE_ROLES = {"administrator", "editor", "coordinator", "viewer", "scheduled_viewer"}
 VALID_AREA_ROLES = {"administrator", "editor", "viewer", "scheduled_viewer"}  # no coordinator for songs/media
+
+SIGNATURE_IMAGE_MAX_BYTES = 1 * 1024 * 1024  # 1 MB decoded
+_DATA_URL_RE = re.compile(r"^data:(image/[a-zA-Z0-9+.-]+);base64,(.+)$", re.DOTALL)
+
+
+def _validate_signature_image(value: str | None) -> str | None:
+    """Accepts a base64 data URL (image/*) ≤1 MB decoded, or null to clear."""
+    if value is None or value == "":
+        return None
+    m = _DATA_URL_RE.match(value)
+    if not m:
+        raise HTTPException(status_code=400, detail="Imagen inválida (debe ser data URL base64 de tipo image/*)")
+    try:
+        raw = base64.b64decode(m.group(2), validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Imagen inválida (base64 corrupto)")
+    if len(raw) > SIGNATURE_IMAGE_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="Imagen demasiado grande (máx. 1 MB)")
+    return value
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -124,6 +145,11 @@ async def _serialize(sm: ServiceMember, om: OrgMember, db: AsyncSession) -> dict
             "max_per_month": sm.scheduling_max_per_month,  # null = unlimited
             "max_per_day": sm.scheduling_max_per_day,      # null = unlimited
         },
+        "signature": {
+            "text":  sm.signature_text,
+            "image": sm.signature_image,  # full data: URL or null
+        },
+        "preferred_notif_app": sm.preferred_notif_app,
         # TEST-ONLY — plaintext password stored for local QA. Remove before prod.
         "debug_password": sm.debug_password,
     }
@@ -289,8 +315,6 @@ async def update_service_person(
     db: AsyncSession = Depends(get_db),
 ):
     org, caller, org_role, svc_role = await _auth(slug, authorization, tenant_access, db)
-    if not _can_manage_people(org_role, svc_role):
-        raise HTTPException(status_code=403, detail="Solo administradores pueden modificar permisos")
     try:
         smu = uuid.UUID(sm_id)
     except Exception:
@@ -303,6 +327,18 @@ async def update_service_person(
     if row is None:
         raise HTTPException(status_code=404, detail="Persona no encontrada")
     sm, om = row
+
+    # Permission split: signature is self-editable; everything else (roles,
+    # file_access, scheduling caps, type permissions) requires admin/leader/svc admin.
+    is_self = caller is not None and caller.id == om.id
+    # Both 'signature' and 'preferred_notif_app' are self-editable; everything
+    # else (roles, file_access, scheduling caps, type permissions) requires admin.
+    self_editable = {"signature", "preferred_notif_app"}
+    admin_only_keys = set(body.keys()) - self_editable
+    if admin_only_keys and not _can_manage_people(org_role, svc_role):
+        raise HTTPException(status_code=403, detail="Solo administradores pueden modificar permisos")
+    if (body.keys() & self_editable) and not (is_self or _can_manage_people(org_role, svc_role)):
+        raise HTTPException(status_code=403, detail="Sin permiso")
 
     if "service_role" in body or "songs_role" in body or "media_role" in body:
         svc_r, songs_r, media_r = _validate_perms({
@@ -333,6 +369,23 @@ async def update_service_person(
             sm.scheduling_max_per_month = _cap(sc["max_per_month"])
         if "max_per_day" in sc:
             sm.scheduling_max_per_day = _cap(sc["max_per_day"])
+
+    if "signature" in body and isinstance(body["signature"], dict):
+        sig = body["signature"]
+        if "text" in sig:
+            v = sig["text"]
+            sm.signature_text = (v or None) if isinstance(v, str) else None
+            # Cap text to keep DB rows reasonable (~16 KB)
+            if sm.signature_text is not None and len(sm.signature_text) > 16_000:
+                raise HTTPException(status_code=400, detail="Firma de texto demasiado larga (máx. 16 000 caracteres)")
+        if "image" in sig:
+            sm.signature_image = _validate_signature_image(sig["image"])
+
+    if "preferred_notif_app" in body:
+        v = (body["preferred_notif_app"] or "").lower()
+        if v not in ("servicios", "worsyn"):
+            raise HTTPException(status_code=400, detail="preferred_notif_app inválido")
+        sm.preferred_notif_app = v
 
     if "type_permissions" in body and isinstance(body["type_permissions"], list):
         existing = (await db.execute(

@@ -155,6 +155,9 @@ Until then, clients should assume "small enough to fetch fully".
 | Services · People    | `/tenant/{slug}/services/people`         | Stable    | GET, POST, PATCH, DELETE + welcome + reset-password (test) |
 | Services · Blockouts | `/tenant/{slug}/services/people/{id}/blockouts` | Stable | GET, POST, PATCH, DELETE |
 | Teams                | `/tenant/{slug}/teams`                   | Stable    | GET, POST, PATCH, DELETE + memberships |
+| Email · Templates    | `/tenant/{slug}/email/templates`         | Stable    | GET, POST, PATCH, DELETE (4 kinds) |
+| Email · Messages     | `/tenant/{slug}/email/messages`          | Stable    | GET, POST (queues for SMTP), GET /{id} + /preview |
+| Email · Per-person   | `/tenant/{slug}/services/people/{id}/messages` | Stable | GET (mailbox: sent ∪ received for the person) |
 | Songs                | `/tenant/{slug}/songs`                   | **Stub**  | GET only (POST/PATCH/DELETE pending — Phase 3) |
 | Media                | `/tenant/{slug}/media`                   | **Stub**  | GET only |
 | Scores               | `/tenant/{slug}/scores`                  | **Stub**  | GET only |
@@ -1192,6 +1195,35 @@ Update via `PATCH /tenant/{slug}/services/people/{sm_id}` body:
 
 Either value can be omitted (no change), `null`, `0`, or `""` (all interpreted as "unlimited"). Range is 1–31. The list/get response always includes `"scheduling": { "max_per_month": ..., "max_per_day": ... }`.
 
+### Email signature
+
+`ServiceMember` carries an optional signature used by outgoing tenant emails (once SMTP is wired in Phase 3).
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `signature.text`  | `string \| null` | `null` | Multi-line text (≤ 16 000 chars). Saved verbatim, displayed `pre-wrap`. |
+| `signature.image` | `string \| null` | `null` | **Base64 data URL** (`data:image/*;base64,...`). Decoded size capped at **1 MB**. Use `null` to clear. |
+
+**Permission**: signature is self-editable — the person can update their own without admin rights. Admin/leader (or impersonation) can update any. Other PATCH fields (`service_role`, `scheduling`, `file_access`, etc.) still require admin/leader.
+
+Update via `PATCH /tenant/{slug}/services/people/{sm_id}`:
+
+```json
+{ "signature": {
+    "text":  "Jibsan Rosa\nLíder de Alabanza\nComunidad Cristiana de Camarma",
+    "image": "data:image/png;base64,iVBORw0KGgoAAA…"
+} }
+```
+
+Send only the fields you want to change. Send `"image": null` to remove the current image without touching the text.
+
+#### Errors
+
+| Code | Detail |
+|------|--------|
+| 400  | Imagen inválida (debe ser data URL base64 de tipo image/*) · Imagen inválida (base64 corrupto) · Imagen demasiado grande (máx. 1 MB) · Firma de texto demasiado larga (máx. 16 000 caracteres) |
+| 403  | Sin permiso para editar la firma |
+
 ### Teams of a person
 
 | Method | Path | Description |
@@ -1367,6 +1399,134 @@ A Team groups org_members for service assignments (Adoración, Audio/Visual, Rec
 | 403  | Solo administradores y líderes |
 | 404  | Equipo no encontrado · Miembro no encontrado · Pertenencia no encontrada |
 | 409  | Ya está en el equipo |
+
+---
+
+## Tenant · Email
+
+Per-org templates + message log + send-rendered. SMTP is **not wired yet** — new sends are persisted with `status="queued"` so the future worker (worsyn-integrations) can flush them. The variable engine is documented at length in [`EMAIL-VARIABLES.md`](./EMAIL-VARIABLES.md).
+
+### Templates
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/tenant/{slug}/email/templates?kind=…` | JWT or cookie | List per-org templates. Optional `kind` filter |
+| POST   | `/tenant/{slug}/email/templates` | admin/leader/coordinator/svc-editor | Create template |
+| PATCH  | `/tenant/{slug}/email/templates/{tpl_id}` | admin/leader/coordinator/svc-editor | Update fields |
+| DELETE | `/tenant/{slug}/email/templates/{tpl_id}` | admin/leader/coordinator/svc-editor | Delete template |
+
+`kind` ∈ `general | schedule | signup | welcome`.
+
+#### POST body
+
+```json
+{
+  "kind": "welcome",
+  "name": "Bienvenida Equipo de Adoración",
+  "subject": "¡Bienvenido(a) a {{ organization.name }}!",
+  "body": "Hola {{ to.first_name }},\n\n…",
+  "is_default": false
+}
+```
+
+#### Response
+
+```json
+{
+  "id": "uuid", "kind": "welcome", "name": "...",
+  "subject": "...", "body": "...",
+  "is_default": false,
+  "created_at": "...", "updated_at": "..."
+}
+```
+
+### Messages (sent + received log)
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/tenant/{slug}/email/messages?direction=sent|received&limit=100` | admin/leader/coordinator/svc-editor | Org-wide log. Personal mailbox uses the per-person endpoint |
+| GET    | `/tenant/{slug}/email/messages/{msg_id}` | sender / recipient / admin | Single message detail |
+| POST   | `/tenant/{slug}/email/messages` | admin/leader/coordinator/svc-editor | "Send" — renders + stores one row per recipient (`status="queued"`) |
+| POST   | `/tenant/{slug}/email/messages/preview` | admin/leader/coordinator/svc-editor | Render against a specific recipient WITHOUT sending |
+| GET    | `/tenant/{slug}/services/people/{sm_id}/messages?direction=…` | self / admin / leader / svc-admin | Per-person mailbox (sent ∪ received) |
+
+#### POST /messages — send
+
+```json
+{
+  "recipient_member_ids": ["<org_member uuid>", "..."],
+  "template_id": "<uuid or null>",
+  "subject": "Hola {{ to.first_name }}",
+  "body": "..."
+}
+```
+
+- 1–50 recipient IDs (capped server-side). One `EmailMessage` row created per resolved recipient.
+- `template_id` is optional metadata — the server doesn't auto-merge it; submit the resolved subject/body yourself (the compose UI does this).
+- Subject + body run through the variable engine **per recipient** (`to.*` is freshly built each time).
+- Status is `queued` until the SMTP worker (Phase 3) dispatches.
+
+#### POST /messages/preview
+
+```json
+{ "recipient_member_id": "<uuid>", "subject": "...", "body": "..." }
+```
+
+Returns `{ "subject": "<rendered>", "body": "<rendered>", "context_keys_used": [] }`. Use this to power "Vista previa" in the compose UI.
+
+#### Message row response
+
+```json
+{
+  "id": "uuid",
+  "direction": "sent",
+  "status": "queued|sent|delivered|failed|received",
+  "subject": "...",
+  "body": "<rendered body>",
+  "recipient_email": "maria@iglesia.com",
+  "sender_email": "jibsan@iglesia.com",
+  "recipient_member_id": "uuid|null",
+  "sender_member_id": "uuid|null",
+  "template_id": "uuid|null",
+  "sent_at": "ISO|null",
+  "created_at": "ISO",
+  "error": null,
+  "counterparty_name": "María García"
+}
+```
+
+`counterparty_name`: the "other side" (recipient name for sent rows, sender name for received).
+
+### Retention
+
+`organizations.email_retention_months` (default `3`, max `12`) controls how long rows live in `email_messages`. The cleanup cron is **not wired yet** — see `CONTEXT.md → Para quitar antes de producción / TODOs` for the scheduled deletion task. Surfaced in org settings UI (Phase 3).
+
+### Notification preference (per person)
+
+`PATCH /tenant/{slug}/services/people/{sm_id}` accepts a self-editable `preferred_notif_app`:
+
+```json
+{ "preferred_notif_app": "servicios" }
+```
+
+Values: `servicios` (default — this module's portal + future mobile app) or `worsyn` (reserved for future Worsyn app; client should disable in UI for now). The GET response always exposes `preferred_notif_app`.
+
+### Errors
+
+| Code | Detail |
+|------|--------|
+| 400  | kind inválido · Nombre requerido · Nombre vacío · Asunto requerido · Cuerpo requerido · Debes indicar al menos un destinatario · Máximo 50 destinatarios por envío · recipient_member_ids contiene IDs inválidos · Plantilla no encontrada · preferred_notif_app inválido |
+| 401  | No autenticado · Token inválido · Miembro no encontrado |
+| 403  | Sin permiso · Sin permiso para enviar correos |
+| 404  | Plantilla no encontrada · Mensaje no encontrado · Persona no encontrada · Destinatario no encontrado |
+
+### Variable engine
+
+See [`EMAIL-VARIABLES.md`](./EMAIL-VARIABLES.md) for the full catalog. TL;DR:
+
+- `{{ var }}` substitutes values; missing → empty string
+- `{% if var %}…{% else %}…{% endif %}` for branching (no nesting in v1)
+- Context buckets: `to.*` (recipient), `from.*` (sender, incl. `from.signature`), `organization.*`, `service.*` (plan context, empty for now)
 
 ---
 

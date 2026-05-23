@@ -145,6 +145,24 @@ service_members      — permisos del módulo Servicios por miembro
   file_access_plans BOOL, file_access_songs BOOL, file_access_media BOOL,
   scheduling_max_per_month INT NULL (NULL = sin límite, 1..31),
   scheduling_max_per_day   INT NULL (NULL = sin límite, 1..31),
+  signature_text  TEXT NULL (≤16 000 chars — firma para emails),
+  signature_image TEXT NULL (data URL base64 image/* — máx 1 MB decoded),
+  preferred_notif_app VARCHAR(20) DEFAULT 'servicios' (servicios|worsyn),
+email_templates      — plantillas reutilizables por organización
+  id, org_id (FK CASCADE), kind (general|schedule|signup|welcome),
+  name VARCHAR(150), subject VARCHAR(255), body TEXT,
+  is_default BOOL, created_by (FK→org_members SET NULL),
+  created_at, updated_at
+email_messages       — log de envíos/recepciones por organización
+  id, org_id (FK CASCADE), template_id (FK→email_templates SET NULL nullable),
+  sender_member_id  (FK→org_members SET NULL nullable),
+  recipient_member_id (FK→org_members SET NULL nullable),
+  recipient_email, sender_email,
+  direction (sent|received), status (queued|sent|delivered|failed|received),
+  subject VARCHAR(500), body_rendered TEXT, body_template TEXT,
+  error TEXT nullable, sent_at, created_at (indexed)
+  Retención: organizations.email_retention_months (default 3, max 12)
+  Render: app/services/email_render.py — soporta {{var}} + {%if%}{%endif%}
   welcomed_at (ts nullable), password_set_at (ts nullable),
   created_at, updated_at
 service_member_type_perms — override por tipo de servicio (Same-as-parent)
@@ -208,6 +226,7 @@ tenants          — tenant Docker por organización (one-to-one con organizatio
 organizations    — tenants (iglesias cliente)
   id, name, slug, plan, status, country, city, phone, website, email, alias,
   ministries (JSONB []), member_roles (JSONB []), icon (TEXT base64), require_2fa_admins,
+  email_retention_months INT default 3 (1..12),
   created_at, updated_at
 
 org_members      — usuarios de cada iglesia (no tienen acceso al panel)
