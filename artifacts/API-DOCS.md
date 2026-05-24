@@ -158,6 +158,7 @@ Until then, clients should assume "small enough to fetch fully".
 | Email · Templates    | `/tenant/{slug}/email/templates`         | Stable    | GET, POST, PATCH, DELETE (4 kinds) |
 | Email · Messages     | `/tenant/{slug}/email/messages`          | Stable    | GET, POST (queues for SMTP), GET /{id} + /preview |
 | Email · Per-person   | `/tenant/{slug}/services/people/{id}/messages` | Stable | GET (mailbox: sent ∪ received for the person) |
+| Auth · Reset password| `/tenant/auth/reset-password/{token}`    | Stable    | GET (token info, public), POST (set new pwd, public) |
 | Songs                | `/tenant/{slug}/songs`                   | **Stub**  | GET only (POST/PATCH/DELETE pending — Phase 3) |
 | Media                | `/tenant/{slug}/media`                   | **Stub**  | GET only |
 | Scores               | `/tenant/{slug}/scores`                  | **Stub**  | GET only |
@@ -1519,6 +1520,41 @@ Values: `servicios` (default — this module's portal + future mobile app) or `w
 | 401  | No autenticado · Token inválido · Miembro no encontrado |
 | 403  | Sin permiso · Sin permiso para enviar correos |
 | 404  | Plantilla no encontrada · Mensaje no encontrado · Persona no encontrada · Destinatario no encontrado |
+
+### Welcome flow + magic link (set-password)
+
+When a tenant admin adds a new `service_person` with `send_welcome=true`, the backend:
+
+1. Issues a fresh URL-safe token (32 bytes) → stored in `org_members.password_reset_token` with 7-day expiry
+2. Auto-seeds the default Welcome template if the org has none (`kind=welcome`, `is_default=true`)
+3. Renders the welcome template with `{{ to.welcome_url }}` = `{general.app_url}/set-password/{token}`
+4. Queues an email_messages row + schedules SMTP dispatch (BackgroundTask)
+5. The recipient clicks the link → frontend `/set-password/:token` page
+
+Two public endpoints (no auth — the token IS the auth):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET    | `/tenant/auth/reset-password/{token}` | Returns `{ email, full_name, org_name, org_slug, expires_at }` or 404 if invalid/used, 410 if expired |
+| POST   | `/tenant/auth/reset-password/{token}` body `{ password }` | Sets the new password, marks token used. Returns `{ org_slug, email }` for the "Ir a Servicios" redirect |
+
+Token rules:
+- Minimum 8 characters server-side (`MIN_PASSWORD_LEN`)
+- Rejects obvious commons: `password`, `12345678`, `contraseña`, `worsyn`
+- Single-use: cleared on successful POST
+- Reissuing welcome (via POST `/services/people/{sm_id}/welcome`) **rotates the token** — the previous one becomes invalid
+
+When SMTP is **not** configured, the welcome falls back to the legacy temp-password path (returns `temp_password` ONCE in the response so the admin can share manually).
+
+### Auto-mirror sent → received
+
+When a sent message's recipient is an `org_member` of the same org, the SMTP dispatcher creates a mirror row with `direction='received'`, `status='received'`. The recipient sees it in their Worsyn "Recibidos" tab AND in their real email inbox.
+
+### Delete message
+
+| Method | Path | Description |
+|--------|------|-------------|
+| DELETE | `/tenant/{slug}/email/messages/{msg_id}` | Removes the Worsyn record ONLY. Does NOT touch the user's external inbox (Gmail/iCloud). Allowed: admin/leader/coord/svc-editor for any row · sender/recipient for their own |
 
 ### Variable engine
 

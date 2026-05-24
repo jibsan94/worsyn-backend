@@ -11,7 +11,7 @@ from app.api.v1.endpoints import (
     organizations, settings, tenant_portal,
     # Tenant modules — independent, scoped per slug
     tenant_calendar, tenant_email, tenant_events, tenant_finance, tenant_media, tenant_member_attachments,
-    tenant_rehearsals, tenant_scores, tenant_service_blockouts, tenant_service_people, tenant_services, tenant_songs, tenant_teams,
+    tenant_rehearsals, tenant_reset_password, tenant_scores, tenant_service_blockouts, tenant_service_people, tenant_services, tenant_songs, tenant_teams,
 )
 
 api_router = APIRouter()
@@ -30,6 +30,7 @@ api_router.include_router(logs.router)
 
 # Tenant portal — auth + cross-module (login, switch, settings, profile, members)
 api_router.include_router(tenant_portal.router)
+api_router.include_router(tenant_reset_password.router)
 
 # Tenant modules — disable any line below to put that module in maintenance
 api_router.include_router(tenant_services.router)

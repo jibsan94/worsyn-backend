@@ -244,7 +244,9 @@ org_members      — usuarios de cada iglesia (no tienen acceso al panel)
   id, org_id, email, hashed_password (nullable), full_name, phone, role, is_active,
   joined_at, updated_at,
   prefix, gender, birthdate, anniversary, ministry, org_roles (JSONB []),
-  avatar (TEXT nullable — base64 data URL, max ~3 MB)
+  avatar (TEXT nullable — base64 data URL, max ~3 MB),
+  password_reset_token VARCHAR(64) nullable (indexed) — magic link de bienvenida/reset
+  password_reset_expires_at TIMESTAMP TZ nullable — TTL 7 días
 
 member_attachments — ficheros adjuntos a org_members (base64 en DB)
   id, org_id (FK→organizations CASCADE), member_id (FK→org_members CASCADE),

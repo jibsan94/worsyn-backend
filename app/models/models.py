@@ -75,6 +75,10 @@ class OrgMember(Base):
     ministry: Mapped[str | None] = mapped_column(String(100), nullable=True)
     org_roles: Mapped[list] = mapped_column(JSON, default=list)
     avatar: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Magic-link token issued by the welcome email — see /api/v1/auth/reset-password/{token}.
+    # Also reused for "forgot password" flow (Phase 3). Single active token per member.
+    password_reset_token: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    password_reset_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     organization: Mapped["Organization"] = relationship("Organization", back_populates="members")
 

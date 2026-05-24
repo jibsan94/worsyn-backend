@@ -210,6 +210,25 @@ async def dispatch_queued(message_ids: list[uuid.UUID]) -> None:
                         row.status = "sent"
                         row.sent_at = datetime.now(timezone.utc)
                         row.error = None
+                        # Mirror into recipient's "Recibidos" inbox if they are
+                        # an org member of THIS org (so they see the same email
+                        # both in their Gmail/iCloud AND in Worsyn Servicios).
+                        if row.recipient_member_id is not None:
+                            mirror = EmailRow(
+                                org_id=row.org_id,
+                                template_id=row.template_id,
+                                sender_member_id=row.sender_member_id,
+                                recipient_member_id=row.recipient_member_id,
+                                recipient_email=row.recipient_email,
+                                sender_email=row.sender_email,
+                                direction="received",
+                                status="received",
+                                subject=row.subject,
+                                body_rendered=row.body_rendered,
+                                body_template=row.body_template,
+                                sent_at=row.sent_at,
+                            )
+                            db.add(mirror)
                     except Exception as e:  # noqa: BLE001
                         log.exception("SMTP per-row send failed: %s", row.id)
                         row.status = "failed"

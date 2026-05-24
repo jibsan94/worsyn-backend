@@ -25,7 +25,7 @@ import string
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -198,6 +198,7 @@ def _validate_perms(body: dict) -> tuple[str, str | None, str | None]:
 @router.post("", status_code=201)
 async def add_service_person(
     slug: str, body: dict,
+    background: BackgroundTasks,
     authorization: str | None = Header(default=None),
     tenant_access: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
@@ -288,21 +289,35 @@ async def add_service_person(
             continue
         db.add(ServiceMemberTypePerm(service_member_id=sm.id, service_type_id=stid, role=role_override))
 
-    # Welcome / temp password — skipped entirely for org admins (they already
-    # have a tenant-level password and don't need a Services-only credential).
+    # Welcome — send the magic-link email via SMTP. Skipped entirely for org
+    # admins (they already have a tenant-level password). Falls back to legacy
+    # temp_password path if SMTP isn't configured yet, so the admin can still
+    # share creds manually.
+    welcome_url: str | None = None
     if body.get("send_welcome") and om.role != "admin":
-        if not om.hashed_password:
+        sm.welcomed_at = datetime.now(timezone.utc)
+        from app.api.v1.endpoints.tenant_email import send_welcome_email  # local import to avoid cycle
+        from app.services.smtp import load_config
+        smtp_cfg = await load_config(db)
+        if smtp_cfg.is_configured():
+            _, welcome_url = await send_welcome_email(
+                org=org, recipient_member=om, sender_member=caller,
+                db=db, background=background,
+            )
+        elif not om.hashed_password:
+            # SMTP missing → legacy fallback (admin shares manually). Test-only.
             temp_password = _gen_temp_password()
             om.hashed_password = hash_password(temp_password)
-            sm.debug_password = temp_password  # TEST-ONLY (see CONTEXT.md)
-        sm.welcomed_at = datetime.now(timezone.utc)
+            sm.debug_password = temp_password
 
     await db.flush()
     await db.refresh(sm)
     await db.refresh(om)
     out = await _serialize(sm, om, db)
     if temp_password is not None:
-        out["temp_password"] = temp_password  # one-shot: admin shares manually until SMTP wired
+        out["temp_password"] = temp_password  # SMTP-not-configured fallback
+    if welcome_url is not None:
+        out["welcome_url"] = welcome_url  # so admin can copy if needed
     return out
 
 
@@ -451,13 +466,15 @@ async def delete_service_person(
 @router.post("/{sm_id}/welcome")
 async def send_welcome(
     slug: str, sm_id: str,
+    background: BackgroundTasks,
     authorization: str | None = Header(default=None),
     tenant_access: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate a temp password (if member has no password) and mark welcomed_at.
+    """Issue a fresh magic-link token + queue the welcome email via SMTP.
 
-    Returns the temp password ONCE for manual sharing (SMTP not wired yet).
+    Falls back to legacy temp_password (returned ONCE) when SMTP isn't
+    configured yet — admin shares manually until SMTP lands.
     """
     org, caller, org_role, svc_role = await _auth(slug, authorization, tenant_access, db)
     if not _can_manage_people(org_role, svc_role):
@@ -474,14 +491,23 @@ async def send_welcome(
     if row is None:
         raise HTTPException(status_code=404, detail="Persona no encontrada")
     sm, om = row
-    # Org admins use their existing tenant password — never issue Services creds.
     if om.role == "admin":
         raise HTTPException(
             status_code=400,
             detail="El Administrador de la organización ya tiene contraseña del tenant",
         )
+
+    from app.api.v1.endpoints.tenant_email import send_welcome_email  # local import
+    from app.services.smtp import load_config
+    smtp_cfg = await load_config(db)
     temp = None
-    if not om.hashed_password:
+    welcome_url: str | None = None
+    if smtp_cfg.is_configured():
+        _, welcome_url = await send_welcome_email(
+            org=org, recipient_member=om, sender_member=caller,
+            db=db, background=background,
+        )
+    elif not om.hashed_password:
         temp = _gen_temp_password()
         om.hashed_password = hash_password(temp)
         sm.debug_password = temp  # TEST-ONLY
@@ -489,7 +515,8 @@ async def send_welcome(
     await db.flush()
     return {
         "id": str(sm.id), "welcomed_at": sm.welcomed_at.isoformat(),
-        "temp_password": temp,  # null if user already has a password
+        "temp_password": temp,  # null if SMTP sent or user already has a password
+        "welcome_url": welcome_url,
         "email": om.email,
     }
 

@@ -16,12 +16,53 @@ max 12) are eligible for cleanup. Cron not yet wired.
 
 Variable engine docs → `artifacts/EMAIL-VARIABLES.md`.
 """
+import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, Header, HTTPException, status
 
 from app.services.smtp import dispatch_queued
+
+WELCOME_TOKEN_TTL_DAYS = 7
+
+# Default welcome template — auto-seeded per org the first time templates are
+# listed if no `welcome` template exists. Editable + deletable from the UI.
+DEFAULT_WELCOME_SUBJECT = "¡Bienvenido(a) {{ to.first_name }} a {{ organization.name }} en Worsyn!"
+DEFAULT_WELCOME_BODY = """<p>Hola {{ to.name }},</p>
+
+<p>¡{{ from.name }} te ha invitado a usar la cuenta de Services de {{ organization.name }} en Worsyn!</p>
+
+<p>Worsyn Services es una herramienta en línea que ayuda a las iglesias a organizar a su equipo y planificar los próximos servicios. Con tus permisos de <strong>{{ to.max_plan_permissions_s }}</strong>, podrás iniciar sesión en cualquier momento para activar las notificaciones, marcar los días en los que no estarás disponible y ajustar tus preferencias de programación.</p>
+
+<h3>Cómo iniciar sesión</h3>
+
+<p>Para acceder a Worsyn, necesitas establecer tu contraseña:</p>
+
+<p style="text-align: center; margin: 24px 0;">
+  <a href="{{ to.welcome_url }}" style="background:#4F46E5;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">Establecer mi contraseña</a>
+</p>
+
+<p style="font-size: 12px; color: #64748B;">El enlace caduca en {{ to.welcome_ttl_days }} días. Tu método de inicio de sesión es: <strong>{{ to.login_method }}</strong>. Recuerda no compartir tu contraseña con nadie.</p>
+
+<hr/>
+
+<h3>Enlaces útiles</h3>
+<p>Si es tu primera vez usando Worsyn Services, te recomendamos visitar la página de Primeros pasos. También puedes:</p>
+<ul>
+  <li>Ver tu horario y planes asignados</li>
+  <li>Configurar tus preferencias de programación</li>
+  <li>Actualizar tu perfil</li>
+  <li>Descargar la app móvil (próximamente)</li>
+</ul>
+
+{% if to.scheduler_at_all? %}
+<hr/>
+<p>Con tus permisos de <strong>{{ to.max_plan_permissions_s }}</strong>, también podrás gestionar equipos y programar personas en los planes. Tendrás acceso a las guías de coordinador y planificador de servicios.</p>
+{% endif %}
+
+<p style="margin-top: 24px;">{{ from.signature }}</p>
+"""
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -92,6 +133,7 @@ async def list_templates(
     db: AsyncSession = Depends(get_db),
 ):
     org, _, _, _ = await _auth(slug, authorization, tenant_access, db)
+    await autoseed_default_templates(org.id, db)  # ensure default Welcome exists
     q = select(EmailTemplate).where(EmailTemplate.org_id == org.id)
     if kind:
         if kind not in VALID_KINDS:
@@ -317,6 +359,36 @@ async def get_message(
     return enriched[0]
 
 
+@router.delete("/messages/{msg_id}", status_code=204)
+async def delete_message(
+    slug: str, msg_id: str,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a message row from Worsyn's log. Does NOT remove from the user's
+    actual email inbox (Gmail/iCloud/etc.) — that's out of our control.
+
+    Allowed: admin/leader/coord/svc-editor for any row; otherwise the sender or
+    the recipient may delete only their own.
+    """
+    org, caller, org_role, svc_role = await _auth(slug, authorization, tenant_access, db)
+    try:
+        mid = uuid.UUID(msg_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+    m = (await db.execute(
+        select(EmailMessage).where(EmailMessage.id == mid, EmailMessage.org_id == org.id)
+    )).scalar_one_or_none()
+    if m is None:
+        raise HTTPException(status_code=404, detail="Mensaje no encontrado")
+    is_admin = org_role in ("admin", "leader") or svc_role in ("administrator", "editor", "coordinator")
+    is_party = caller is not None and (m.sender_member_id == caller.id or m.recipient_member_id == caller.id)
+    if not (is_admin or is_party):
+        raise HTTPException(status_code=403, detail="Sin permiso para eliminar")
+    await db.delete(m)
+
+
 @router.post("/messages", status_code=201)
 async def send_message(
     slug: str, body: dict,
@@ -453,3 +525,111 @@ async def list_person_messages(
     q = q.order_by(EmailMessage.created_at.desc()).limit(200)
     rows = (await db.execute(q)).scalars().all()
     return await _enrich_messages(rows, db)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Welcome flow (reusable from tenant_service_people)
+# ─────────────────────────────────────────────────────────────────────────────
+async def autoseed_default_templates(org_id: uuid.UUID, db: AsyncSession) -> None:
+    """Insert the default Welcome template for an org if it has none yet.
+    Idempotent — once any `welcome` template exists, no-op."""
+    existing = (await db.execute(
+        select(EmailTemplate).where(EmailTemplate.org_id == org_id, EmailTemplate.kind == "welcome").limit(1)
+    )).scalar_one_or_none()
+    if existing is not None:
+        return
+    db.add(EmailTemplate(
+        org_id=org_id, kind="welcome",
+        name="Bienvenida (por defecto)",
+        subject=DEFAULT_WELCOME_SUBJECT,
+        body=DEFAULT_WELCOME_BODY,
+        is_default=True,
+    ))
+    await db.flush()
+
+
+def _gen_token(nbytes: int = 32) -> str:
+    return secrets.token_urlsafe(nbytes)
+
+
+async def _resolve_app_url(db: AsyncSession) -> str:
+    """Read general.app_url from system_settings, fall back to localhost dev."""
+    from app.models.models import SystemSetting  # local import to avoid cycle
+    row = (await db.execute(
+        select(SystemSetting).where(SystemSetting.key == "general.app_url")
+    )).scalar_one_or_none()
+    return (row.value if row and row.value else "http://10.211.55.11").rstrip("/")
+
+
+async def send_welcome_email(
+    *, org, recipient_member, sender_member, db: AsyncSession, background: BackgroundTasks,
+) -> tuple[uuid.UUID, str]:
+    """Issue a magic-link reset token + render the org's welcome template +
+    queue an email + schedule SMTP dispatch.
+
+    Returns (email_message_id, welcome_url). Idempotent on the membership row;
+    caller is responsible for blocking duplicate sends if desired.
+    """
+    # Ensure org has a welcome template (auto-seed default)
+    await autoseed_default_templates(org.id, db)
+    tpl = (await db.execute(
+        select(EmailTemplate).where(EmailTemplate.org_id == org.id, EmailTemplate.kind == "welcome")
+        .order_by(EmailTemplate.is_default.desc(), EmailTemplate.created_at.asc())
+        .limit(1)
+    )).scalar_one()
+
+    # Issue a fresh magic-link token (7d TTL). Overwrites any previous.
+    token = _gen_token()
+    recipient_member.password_reset_token = token
+    recipient_member.password_reset_expires_at = datetime.now(timezone.utc) + timedelta(days=WELCOME_TOKEN_TTL_DAYS)
+
+    app_url = await _resolve_app_url(db)
+    welcome_url = f"{app_url}/set-password/{token}"
+
+    # Build render context. Use service_member role if any (else 'member').
+    rsm = (await db.execute(
+        select(ServiceMember).where(ServiceMember.member_id == recipient_member.id)
+    )).scalar_one_or_none()
+    sender_sm = (await db.execute(
+        select(ServiceMember).where(ServiceMember.member_id == sender_member.id)
+    )).scalar_one_or_none() if sender_member else None
+    ctx = build_context(
+        sender_member=sender_member,
+        sender_signature=(sender_sm.signature_text if sender_sm else None) or "",
+        sender_signature_image=(sender_sm.signature_image if sender_sm else None),
+        recipient_member=recipient_member,
+        recipient_service_role=(rsm.service_role if rsm else None),
+        recipient_has_password=False,  # always false on welcome
+        organization=org,
+    )
+    # Inject welcome-specific vars
+    ctx["to"]["welcome_url"] = welcome_url
+    ctx["to"]["welcome_ttl_days"] = WELCOME_TOKEN_TTL_DAYS
+
+    # Fail-fast: render the subject + body NOW (before insert) and verify the
+    # link survived substitution. If the URL got swallowed (corrupt template,
+    # engine bug, missing app_url) we abort instead of sending a broken email.
+    subject = render(tpl.subject, ctx)
+    body    = render(tpl.body, ctx)
+    if welcome_url not in body:
+        raise RuntimeError(
+            f"Welcome render lost the link. Template missing {{{{ to.welcome_url }}}}? "
+            f"Edit the welcome template to include the placeholder."
+        )
+
+    sender_email = (sender_member.email if sender_member else (org.email or "")) or ""
+    m = EmailMessage(
+        org_id=org.id, template_id=tpl.id,
+        sender_member_id=(sender_member.id if sender_member else None),
+        recipient_member_id=recipient_member.id,
+        recipient_email=recipient_member.email, sender_email=sender_email,
+        direction="sent", status="queued",
+        subject=subject,
+        body_rendered=body,
+        body_template=tpl.body,
+    )
+    db.add(m)
+    await db.flush()
+    mid = m.id
+    background.add_task(dispatch_queued, [mid])
+    return mid, welcome_url

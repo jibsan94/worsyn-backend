@@ -37,6 +37,10 @@ GENERAL_DEFAULTS: dict[str, str] = {
     "general.timezone": "UTC",
     "general.maintenance_mode": "false",
     "general.maintenance_message": "El sistema está en mantenimiento. Vuelve pronto.",
+    # Base URL of the frontend. Used to build magic links inside outgoing emails
+    # (welcome, password reset). MUST be reachable by the recipient — set the
+    # public domain in production. Default is the local LAN address.
+    "general.app_url": "http://10.211.55.11",
 }
 
 SECURITY_DEFAULTS: dict[str, str] = {

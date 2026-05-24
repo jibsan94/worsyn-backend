@@ -232,6 +232,12 @@ Cuando `must_change_password: true`:
 - [x] Envío real wired: `POST /tenant/{slug}/email/messages` ahora agenda `BackgroundTask(dispatch_queued, ids)` después de crear filas — status `queued` → `sent` / `failed` con `error` cuando aplica
 - [x] UI admin `SettingsEmail.tsx` rediseñada: selector de proveedor (Gmail / Workspace / Outlook / SendGrid / Mailgun / Custom) con presets de host/puerto, formulario completo (host, puerto, usuario, contraseña cifrada con máscara `••••••••`, STARTTLS/SSL, from + reply-to), botón "Probar envío" usando valores del form (no guardados)
 - [x] Skill `worsyn-smtp` (`.claude/skills/worsyn-smtp/SKILL.md`) — especialista en configuración por proveedor, diagnóstico de errores SMTP, rotación de clave Fernet, deliverability (SPF/DKIM/DMARC) y mejoras pendientes (worker dedicado, retry con backoff, OAuth2 XOAUTH2)
+- [x] **Auto-mirror sent → received** — cuando `dispatch_queued` confirma envío y el `recipient_member_id` existe, crea fila espejo `direction='received'` para que el destinatario lo vea en su pestaña "Recibidos" del portal Worsyn (además de en su inbox Gmail/iCloud)
+- [x] **DELETE `/tenant/{slug}/email/messages/{id}`** — elimina solo el registro Worsyn (no toca inbox externo). Permisos: admin/leader/coordinator/svc-editor para cualquier fila; sender/recipient para las suyas
+- [x] **Welcome flow real con magic link** — `service_members.send_welcome=true` ahora dispara `send_welcome_email` que: (1) emite token `secrets.token_urlsafe(32)` con TTL 7 días → `org_members.password_reset_token` + `password_reset_expires_at` (2) auto-seed default Welcome template (3) renderiza con `{{ to.welcome_url }}` = `{general.app_url}/set-password/{token}` (4) envía vía SMTP (BG task). Fallback a temp_password si SMTP no configurado
+- [x] **Endpoints públicos `/tenant/auth/reset-password/{token}`** (GET info + POST set new pwd). Token single-use, min 8 chars, rechaza contraseñas obvias
+- [x] **Página pública `/set-password/:token`** (React, fuera del auth shell) con avatar Worsyn, info de la org, doble input + strength meter, botón "Ir a Servicios →" que navega a `/portal/:slug`
+- [x] **`general.app_url`** setting — base URL del frontend usado para construir magic links (default `http://10.211.55.11`, owner ajusta a dominio público en producción)
 
 ## Roles de OrgMember
 

@@ -113,6 +113,15 @@ All values are read at send time. Missing or null → empty string.
 | `organization.city` | str | `Camarma de Esteruelas` | City |
 | `organization.country` | str | `España` | Country |
 
+### Welcome-flow extras (only present in `welcome` templates rendered by `send_welcome_email`)
+
+| Variable | Type | Example | Description |
+|----------|------|---------|-------------|
+| `to.welcome_url` | str | `https://app.worsyn.com/set-password/0__cE-OJF…` | Magic-link URL the recipient clicks to set their password |
+| `to.welcome_ttl_days` | int | `7` | How many days the link stays valid |
+
+These are injected by the welcome helper after `build_context()`. They are NOT available in regular `general` / `schedule` templates.
+
 ### `service.*` — service plan context (only present in `schedule` templates)
 
 | Variable | Type | Notes |
