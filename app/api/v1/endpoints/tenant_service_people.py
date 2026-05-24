@@ -32,8 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import decode_token, hash_password
 from app.db.session import get_db
 from app.models.models import (
-    Organization, OrgMember, ServiceMember, ServiceMemberTypePerm, ServiceType,
-    Team, TeamMembership,
+    Organization, OrgMember, PlanAssignment, ServiceMember, ServiceMemberTypePerm,
+    ServicePlan, ServiceType, Team, TeamMembership,
 )
 
 router = APIRouter(prefix="/tenant/{slug}/services/people", tags=["Tenant · Service People"])
@@ -521,6 +521,55 @@ async def send_welcome(
     }
 
 
+# ── Password reset (10-min magic link via SMTP) ──────────────────────────────
+@router.post("/{sm_id}/password-reset")
+async def send_password_reset(
+    slug: str, sm_id: str,
+    background: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Send a password-reset email to the person. Magic link expires in 10 min.
+    Requires SMTP configured (returns 400 otherwise — no temp-password fallback
+    because reset emails should always come from SMTP, never inline)."""
+    org, caller, org_role, svc_role = await _auth(slug, authorization, tenant_access, db)
+    if not _can_manage_people(org_role, svc_role):
+        raise HTTPException(status_code=403, detail="Solo administradores pueden enviar restablecimientos")
+    try:
+        smu = uuid.UUID(sm_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+    row = (await db.execute(
+        select(ServiceMember, OrgMember)
+        .join(OrgMember, OrgMember.id == ServiceMember.member_id)
+        .where(ServiceMember.id == smu, ServiceMember.org_id == org.id)
+    )).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Persona no encontrada")
+    sm, om = row
+    from app.services.smtp import load_config
+    smtp_cfg = await load_config(db)
+    if not smtp_cfg.is_configured():
+        raise HTTPException(
+            status_code=400,
+            detail="SMTP no configurado. El admin debe configurarlo en Panel → Configuración → Correo SMTP."
+        )
+    from app.api.v1.endpoints.tenant_email import send_password_reset_email
+    mid, reset_url = await send_password_reset_email(
+        org=org, recipient_member=om, sender_member=caller,
+        db=db, background=background,
+    )
+    await db.flush()
+    return {
+        "id": str(sm.id),
+        "email": om.email,
+        "reset_url": reset_url,           # so admin can copy if needed
+        "expires_minutes": 10,
+        "message_id": str(mid),
+    }
+
+
 # ── TEST-ONLY: force-regenerate password and expose plaintext ─────────────────
 # See /artifacts/CONTEXT.md "Para quitar antes de producción".
 @router.post("/{sm_id}/reset-password")
@@ -595,3 +644,212 @@ async def list_person_teams(
         }
         for tm, t in rows
     ]
+
+
+# ── Plan assignments + scheduling summary (Programación → Calendario) ────────
+from datetime import date as _date  # noqa: E402
+
+
+def _parse_iso_date(s: str | None) -> _date | None:
+    if not s: return None
+    try: return _date.fromisoformat(s)
+    except Exception: raise HTTPException(status_code=400, detail=f"Fecha inválida: {s}")
+
+
+@router.get("/{sm_id}/assignments")
+async def list_person_assignments(
+    slug: str, sm_id: str,
+    range_from: str | None = None,    # ISO date YYYY-MM-DD
+    range_to:   str | None = None,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return scheduling summary + upcoming-plans table for one ServiceMember.
+
+    Filters by `service_plans.scheduled_at` ∈ [range_from, range_to). Both
+    optional — if absent, returns ALL assignments for this person. Suggested
+    presets the frontend uses: upcoming (today→null), since 1/3/6/12 months ago
+    (T-Nm → today), custom (user-picked).
+
+    Response shape powers the donut chart + upcoming plans list:
+      { range: {from, to}, summary: {confirmed, pending, declined, total},
+        items: [{id, plan_id, plan_title, service_type_name, service_type_color,
+                 scheduled_at, team_name, position, status, responded_at}] }
+    """
+    org, caller, org_role, svc_role = await _auth(slug, authorization, tenant_access, db)
+    # View: self · admin · leader · any svc role
+    try:
+        smu = uuid.UUID(sm_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+    sm = (await db.execute(
+        select(ServiceMember).where(ServiceMember.id == smu, ServiceMember.org_id == org.id)
+    )).scalar_one_or_none()
+    if sm is None:
+        raise HTTPException(status_code=404, detail="Persona no encontrada")
+    if not (org_role in ("admin", "leader") or svc_role is not None
+            or (caller is not None and caller.id == sm.member_id)):
+        raise HTTPException(status_code=403, detail="Sin acceso")
+
+    rf = _parse_iso_date(range_from)
+    rt = _parse_iso_date(range_to)
+
+    q = (
+        select(PlanAssignment, ServicePlan, ServiceType, Team)
+        .join(ServicePlan, ServicePlan.id == PlanAssignment.service_plan_id)
+        .outerjoin(ServiceType, ServiceType.id == ServicePlan.service_type_id)
+        .outerjoin(Team, Team.id == PlanAssignment.team_id)
+        .where(PlanAssignment.member_id == sm.member_id, PlanAssignment.org_id == org.id)
+    )
+    if rf is not None:
+        from datetime import datetime as _dt, time as _t, timezone as _tz
+        q = q.where(ServicePlan.scheduled_at >= _dt.combine(rf, _t.min, tzinfo=_tz.utc))
+    if rt is not None:
+        from datetime import datetime as _dt, time as _t, timezone as _tz, timedelta as _td
+        q = q.where(ServicePlan.scheduled_at < _dt.combine(rt + _td(days=1), _t.min, tzinfo=_tz.utc))
+    q = q.order_by(ServicePlan.scheduled_at.asc().nullslast())
+
+    rows = (await db.execute(q)).all()
+    items = [
+        {
+            "id": str(a.id),
+            "plan_id": str(p.id),
+            "plan_title": p.title,
+            "service_type_id": str(t.id) if t else None,
+            "service_type_name": t.name if t else None,
+            "service_type_color": t.color if t else None,
+            "scheduled_at": p.scheduled_at.isoformat() if p.scheduled_at else None,
+            "team_id": str(tm.id) if tm else None,
+            "team_name": tm.name if tm else None,
+            "team_color": tm.color if tm else None,
+            "position": a.position,
+            "status": a.status,
+            "requested_at": a.requested_at.isoformat() if a.requested_at else None,
+            "responded_at": a.responded_at.isoformat() if a.responded_at else None,
+            "decline_reason": a.decline_reason,
+        }
+        for a, p, t, tm in rows
+    ]
+    summary = {
+        "confirmed": sum(1 for x in items if x["status"] == "confirmed"),
+        "pending":   sum(1 for x in items if x["status"] == "pending"),
+        "declined":  sum(1 for x in items if x["status"] == "declined"),
+        "total":     len(items),
+    }
+    return {
+        "range": {"from": range_from, "to": range_to},
+        "summary": summary,
+        "items": items,
+    }
+
+
+@router.post("/{sm_id}/assignments", status_code=201)
+async def create_person_assignment(
+    slug: str, sm_id: str, body: dict,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Assign this person to a service_plan (admin/leader/coord)."""
+    org, caller, org_role, svc_role = await _auth(slug, authorization, tenant_access, db)
+    if not (org_role in ("admin", "leader") or svc_role in ("administrator", "editor", "coordinator")):
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    try:
+        smu = uuid.UUID(sm_id)
+        plan_id = uuid.UUID(body.get("service_plan_id") or "")
+    except Exception:
+        raise HTTPException(status_code=400, detail="IDs inválidos")
+    sm = (await db.execute(
+        select(ServiceMember).where(ServiceMember.id == smu, ServiceMember.org_id == org.id)
+    )).scalar_one_or_none()
+    if sm is None:
+        raise HTTPException(status_code=404, detail="Persona no encontrada")
+    plan = (await db.execute(
+        select(ServicePlan).where(ServicePlan.id == plan_id, ServicePlan.org_id == org.id)
+    )).scalar_one_or_none()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Plan no encontrado")
+    team_id = None
+    if body.get("team_id"):
+        try: team_id = uuid.UUID(body["team_id"])
+        except Exception: raise HTTPException(status_code=400, detail="team_id inválido")
+    status_v = (body.get("status") or "pending").lower()
+    if status_v not in ("pending", "confirmed", "declined"):
+        raise HTTPException(status_code=400, detail="status inválido")
+    a = PlanAssignment(
+        org_id=org.id, service_plan_id=plan.id, member_id=sm.member_id,
+        team_id=team_id, position=(body.get("position") or None),
+        status=status_v,
+        requested_by_id=(caller.id if caller else None),
+    )
+    db.add(a)
+    await db.flush()
+    return {"id": str(a.id), "status": a.status, "plan_id": str(plan.id), "member_id": str(sm.member_id)}
+
+
+@router.patch("/{sm_id}/assignments/{assignment_id}")
+async def update_person_assignment(
+    slug: str, sm_id: str, assignment_id: str, body: dict,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update status (the assigned person OR admin/coord)."""
+    org, caller, org_role, svc_role = await _auth(slug, authorization, tenant_access, db)
+    try:
+        smu = uuid.UUID(sm_id); aid = uuid.UUID(assignment_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+    sm = (await db.execute(
+        select(ServiceMember).where(ServiceMember.id == smu, ServiceMember.org_id == org.id)
+    )).scalar_one_or_none()
+    if sm is None:
+        raise HTTPException(status_code=404, detail="Persona no encontrada")
+    a = (await db.execute(
+        select(PlanAssignment).where(PlanAssignment.id == aid, PlanAssignment.member_id == sm.member_id)
+    )).scalar_one_or_none()
+    if a is None:
+        raise HTTPException(status_code=404, detail="Asignación no encontrada")
+    is_self = caller is not None and caller.id == sm.member_id
+    can_admin = org_role in ("admin", "leader") or svc_role in ("administrator", "editor", "coordinator")
+    if not (is_self or can_admin):
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    if "status" in body:
+        s = (body["status"] or "").lower()
+        if s not in ("pending", "confirmed", "declined"):
+            raise HTTPException(status_code=400, detail="status inválido")
+        a.status = s
+        if s in ("confirmed", "declined"):
+            a.responded_at = datetime.now(timezone.utc)
+    if "decline_reason" in body:
+        a.decline_reason = body["decline_reason"] or None
+    await db.flush()
+    return {"id": str(a.id), "status": a.status, "responded_at": a.responded_at.isoformat() if a.responded_at else None}
+
+
+@router.delete("/{sm_id}/assignments/{assignment_id}", status_code=204)
+async def delete_person_assignment(
+    slug: str, sm_id: str, assignment_id: str,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    org, _, org_role, svc_role = await _auth(slug, authorization, tenant_access, db)
+    if not (org_role in ("admin", "leader") or svc_role in ("administrator", "editor", "coordinator")):
+        raise HTTPException(status_code=403, detail="Sin permiso")
+    try:
+        smu = uuid.UUID(sm_id); aid = uuid.UUID(assignment_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID inválido")
+    sm = (await db.execute(
+        select(ServiceMember).where(ServiceMember.id == smu, ServiceMember.org_id == org.id)
+    )).scalar_one_or_none()
+    if sm is None:
+        raise HTTPException(status_code=404, detail="Persona no encontrada")
+    a = (await db.execute(
+        select(PlanAssignment).where(PlanAssignment.id == aid, PlanAssignment.member_id == sm.member_id)
+    )).scalar_one_or_none()
+    if a is None:
+        raise HTTPException(status_code=404, detail="Asignación no encontrada")
+    await db.delete(a)

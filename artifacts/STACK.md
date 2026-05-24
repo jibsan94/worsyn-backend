@@ -179,6 +179,15 @@ system_settings — claves SMTP a nivel plataforma (compartido por todos los ten
 service_member_type_perms — override por tipo de servicio (Same-as-parent)
   id, service_member_id (FK CASCADE), service_type_id (FK CASCADE),
   role (str nullable — NULL = heredar)
+plan_assignments     — persona asignada/solicitada a un service_plan
+  id, org_id (FK CASCADE), service_plan_id (FK CASCADE),
+  member_id (FK→org_members CASCADE), team_id (FK→teams SET NULL nullable),
+  position (str, p.ej. 'Piano'), status (pending|confirmed|declined default pending),
+  requested_by_id (FK→org_members SET NULL), requested_at, responded_at, decline_reason,
+  created_at, updated_at
+  Consumido por: Person Detail → Programación → Resumen de programación (donut + upcoming)
+  Productor (futuro Fase 3): el cuadrante/scheduler generará estas filas leyendo
+  service_times + service_teams + scheduling caps + blockouts
 service_member_blockouts — periodos de indisponibilidad por persona
   id, org_id (FK CASCADE), service_member_id (FK CASCADE),
   start_date (DATE), end_date (DATE), all_day BOOL,

@@ -238,6 +238,12 @@ Cuando `must_change_password: true`:
 - [x] **Endpoints públicos `/tenant/auth/reset-password/{token}`** (GET info + POST set new pwd). Token single-use, min 8 chars, rechaza contraseñas obvias
 - [x] **Página pública `/set-password/:token`** (React, fuera del auth shell) con avatar Worsyn, info de la org, doble input + strength meter, botón "Ir a Servicios →" que navega a `/portal/:slug`
 - [x] **`general.app_url`** setting — base URL del frontend usado para construir magic links (default `http://10.211.55.11`, owner ajusta a dominio público en producción)
+- [x] **Password reset por email** (Comunicación → Contraseña → "Enviar email de restablecimiento") — nuevo `kind=password_reset` en `email_templates` auto-seed, TTL **10 minutos** (vs 7 días del welcome), endpoint `POST /tenant/{slug}/services/people/{sm_id}/password-reset` (admin/leader/coord/svc-editor)
+- [x] Helper genérico `_send_magic_link_email(kind, ttl, ...)` en `tenant_email.py` — comparte la lógica entre welcome y password_reset (token rotation + render con fail-fast + SMTP queue). Wrappers thin: `send_welcome_email` y `send_password_reset_email`
+- [x] Variables nuevas para plantillas reset: `{{ to.welcome_ttl_minutes }}` (= 10) además de `{{ to.welcome_ttl_days }}`. Mismo `{{ to.welcome_url }}` reutilizado
+- [x] **Resumen de programación por persona** (Programación → nueva sección "Resumen de programación") — donut SVG con conteo de **Confirmados / Sin responder / Rechazados** + tabla de planes en el rango. Selector de rango: Próximos · Último mes · Últimos 3/6/12 meses · Personalizado (start+end date)
+- [x] DB: nueva tabla `plan_assignments` (org/plan/member/team/position/status/requested_by/responded_at/decline_reason) — productor futuro: cuadrante de Fase 3
+- [x] Endpoints CRUD `/tenant/{slug}/services/people/{sm_id}/assignments` — GET con `range_from/range_to` (ISO date) devuelve `{ range, summary, items }`. POST/PATCH/DELETE para admin/coord; PATCH self-edit del status (auto-stamps `responded_at`)
 
 ## Roles de OrgMember
 

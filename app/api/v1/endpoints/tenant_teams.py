@@ -13,12 +13,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decode_token
 from app.db.session import get_db
-from app.models.models import Organization, OrgMember, Team, TeamMembership
+from app.models.models import (
+    Organization, OrgMember, ServiceTeam, ServiceType,
+    Team, TeamLeader, TeamMembership,
+)
 
 router = APIRouter(prefix="/tenant/{slug}/teams", tags=["Tenant · Teams"])
 
 
 async def _auth(slug: str, authorization: str | None, cookie: str | None, db: AsyncSession):
+    """Returns (org, caller_or_None, role). caller is None for impersonation."""
     token = authorization[7:] if authorization and authorization.startswith("Bearer ") else cookie
     if not token:
         raise HTTPException(status_code=401, detail="No autenticado")
@@ -29,13 +33,13 @@ async def _auth(slug: str, authorization: str | None, cookie: str | None, db: As
     if org is None:
         raise HTTPException(status_code=404, detail="Org no encontrada")
     if data.get("impersonating"):
-        return org, "admin"
+        return org, None, "admin"
     caller = (await db.execute(
         select(OrgMember).where(OrgMember.id == uuid.UUID(data["sub"]), OrgMember.org_id == org.id)
     )).scalar_one_or_none()
     if caller is None:
         raise HTTPException(status_code=401, detail="Miembro no encontrado")
-    return org, caller.role
+    return org, caller, caller.role
 
 
 def _require_priv(role: str):
@@ -85,6 +89,76 @@ async def _autoseed_defaults(org_id: uuid.UUID, db: AsyncSession) -> None:
     await db.flush()
 
 
+async def _serialize_team(t: Team, db: AsyncSession) -> dict:
+    leaders = (await db.execute(
+        select(TeamLeader, OrgMember)
+        .join(OrgMember, OrgMember.id == TeamLeader.member_id)
+        .where(TeamLeader.team_id == t.id)
+        .order_by(OrgMember.full_name)
+    )).all()
+    stypes = (await db.execute(
+        select(ServiceTeam.service_type_id).where(ServiceTeam.service_type_id != None, ServiceTeam.service_type_id.is_not(None))  # noqa
+        .where(ServiceTeam.team_id == t.id) if False else
+        select(ServiceTeam).where(ServiceTeam.team_id == t.id)
+    )).scalars().all()
+    return {
+        "id": str(t.id), "name": t.name, "color": t.color, "description": t.description,
+        "is_rehearsal": t.is_rehearsal, "is_secure": t.is_secure, "is_split": t.is_split,
+        "member_count": await _members_count(t.id, db),
+        "leaders": [
+            {"member_id": str(om.id), "full_name": om.full_name, "email": om.email}
+            for _tl, om in leaders
+        ],
+        "leader_member_ids": [str(om.id) for _tl, om in leaders],
+        "service_type_ids": [str(st.service_type_id) for st in stypes],
+    }
+
+
+async def _replace_leaders(team_id: uuid.UUID, org_id: uuid.UUID, ids_raw: list, db: AsyncSession) -> None:
+    # Wipe + reinsert. Silently drop unknown / wrong-org member ids.
+    existing = (await db.execute(select(TeamLeader).where(TeamLeader.team_id == team_id))).scalars().all()
+    for x in existing:
+        await db.delete(x)
+    seen: set[uuid.UUID] = set()
+    for raw in ids_raw or []:
+        try:
+            mid = uuid.UUID(raw)
+        except Exception:
+            continue
+        if mid in seen:
+            continue
+        ok = (await db.execute(
+            select(OrgMember.id).where(OrgMember.id == mid, OrgMember.org_id == org_id)
+        )).scalar_one_or_none()
+        if ok is None:
+            continue
+        db.add(TeamLeader(team_id=team_id, member_id=mid))
+        seen.add(mid)
+    await db.flush()
+
+
+async def _replace_service_types(team_id: uuid.UUID, org_id: uuid.UUID, ids_raw: list, db: AsyncSession) -> None:
+    existing = (await db.execute(select(ServiceTeam).where(ServiceTeam.team_id == team_id))).scalars().all()
+    for x in existing:
+        await db.delete(x)
+    seen: set[uuid.UUID] = set()
+    for raw in ids_raw or []:
+        try:
+            stid = uuid.UUID(raw)
+        except Exception:
+            continue
+        if stid in seen:
+            continue
+        ok = (await db.execute(
+            select(ServiceType.id).where(ServiceType.id == stid, ServiceType.org_id == org_id)
+        )).scalar_one_or_none()
+        if ok is None:
+            continue
+        db.add(ServiceTeam(team_id=team_id, service_type_id=stid))
+        seen.add(stid)
+    await db.flush()
+
+
 @router.get("")
 async def list_teams(
     slug: str,
@@ -92,18 +166,12 @@ async def list_teams(
     tenant_access: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    org, _ = await _auth(slug, authorization, tenant_access, db)
+    org, _, _ = await _auth(slug, authorization, tenant_access, db)
     await _autoseed_defaults(org.id, db)
     rows = (await db.execute(
         select(Team).where(Team.org_id == org.id).order_by(Team.name)
     )).scalars().all()
-    out = []
-    for r in rows:
-        out.append({
-            "id": str(r.id), "name": r.name, "color": r.color, "description": r.description,
-            "member_count": await _members_count(r.id, db),
-        })
-    return out
+    return [await _serialize_team(r, db) for r in rows]
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -113,16 +181,32 @@ async def create_team(
     tenant_access: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    org, role = await _auth(slug, authorization, tenant_access, db)
+    org, caller, role = await _auth(slug, authorization, tenant_access, db)
     _require_priv(role)
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Nombre requerido")
-    t = Team(org_id=org.id, name=name, color=body.get("color"), description=body.get("description"))
+    t = Team(
+        org_id=org.id, name=name,
+        color=body.get("color"), description=body.get("description"),
+        is_rehearsal=bool(body.get("is_rehearsal", False)),
+        is_secure=bool(body.get("is_secure", False)),
+        is_split=bool(body.get("is_split", False)),
+    )
     db.add(t)
     await db.flush()
+
+    # Leaders — default to the caller if list missing/empty (matches PCO UX)
+    leader_ids_raw = body.get("leader_member_ids")
+    if not leader_ids_raw and caller is not None:
+        leader_ids_raw = [str(caller.id)]
+    await _replace_leaders(t.id, org.id, leader_ids_raw or [], db)
+
+    # Service-types binding
+    await _replace_service_types(t.id, org.id, body.get("service_type_ids") or [], db)
+
     await db.refresh(t)
-    return {"id": str(t.id), "name": t.name, "color": t.color, "description": t.description, "member_count": 0}
+    return await _serialize_team(t, db)
 
 
 @router.patch("/{team_id}")
@@ -132,7 +216,7 @@ async def update_team(
     tenant_access: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    org, role = await _auth(slug, authorization, tenant_access, db)
+    org, _, role = await _auth(slug, authorization, tenant_access, db)
     _require_priv(role)
     t = await _team(team_id, org.id, db)
     if "name" in body:
@@ -142,9 +226,15 @@ async def update_team(
         t.name = n
     if "color" in body: t.color = body["color"]
     if "description" in body: t.description = body["description"]
+    if "is_rehearsal" in body: t.is_rehearsal = bool(body["is_rehearsal"])
+    if "is_secure" in body:    t.is_secure    = bool(body["is_secure"])
+    if "is_split" in body:     t.is_split     = bool(body["is_split"])
+    if "leader_member_ids" in body and isinstance(body["leader_member_ids"], list):
+        await _replace_leaders(t.id, org.id, body["leader_member_ids"], db)
+    if "service_type_ids" in body and isinstance(body["service_type_ids"], list):
+        await _replace_service_types(t.id, org.id, body["service_type_ids"], db)
     await db.flush()
-    return {"id": str(t.id), "name": t.name, "color": t.color, "description": t.description,
-            "member_count": await _members_count(t.id, db)}
+    return await _serialize_team(t, db)
 
 
 @router.delete("/{team_id}", status_code=204)
@@ -154,7 +244,7 @@ async def delete_team(
     tenant_access: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    org, role = await _auth(slug, authorization, tenant_access, db)
+    org, _, role = await _auth(slug, authorization, tenant_access, db)
     _require_priv(role)
     t = await _team(team_id, org.id, db)
     await db.delete(t)

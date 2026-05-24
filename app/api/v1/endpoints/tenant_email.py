@@ -25,6 +25,23 @@ from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, Header, HTTPExc
 from app.services.smtp import dispatch_queued
 
 WELCOME_TOKEN_TTL_DAYS = 7
+RESET_TOKEN_TTL_MINUTES = 10  # short window for security — typical industry standard
+
+DEFAULT_RESET_SUBJECT = "Restablece tu contraseña de Worsyn"
+DEFAULT_RESET_BODY = """<p>Hola {{ to.name }},</p>
+
+<p>Hemos recibido una solicitud para restablecer tu contraseña en <strong>{{ organization.name }}</strong>.</p>
+
+<p style="text-align: center; margin: 24px 0;">
+  <a href="{{ to.welcome_url }}" style="background:#4F46E5;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">Restablecer contraseña</a>
+</p>
+
+<p style="font-size: 13px; color: #64748B;">Este enlace caduca en <strong>{{ to.welcome_ttl_minutes }} minutos</strong> por motivos de seguridad. Si necesitas otro, pide a un administrador que te lo reenvíe.</p>
+
+<p style="font-size: 12px; color: #94A3B8;">Si no solicitaste este cambio, ignora este correo — tu contraseña actual seguirá funcionando.</p>
+
+<p style="margin-top: 24px;">{{ from.signature }}</p>
+"""
 
 # Default welcome template — auto-seeded per org the first time templates are
 # listed if no `welcome` template exists. Editable + deletable from the UI.
@@ -76,7 +93,7 @@ from app.services.email_render import build_context, render
 router = APIRouter(prefix="/tenant/{slug}/email", tags=["Tenant · Email"])
 people_router = APIRouter(prefix="/tenant/{slug}/services/people", tags=["Tenant · Service People · Messages"])
 
-VALID_KINDS = {"general", "schedule", "signup", "welcome"}
+VALID_KINDS = {"general", "schedule", "signup", "welcome", "password_reset"}
 
 
 # ── Auth helper (mirror of service_people._auth) ──────────────────────────────
@@ -428,6 +445,7 @@ async def send_message(
     if not body_tpl.strip():
         raise HTTPException(status_code=400, detail="Cuerpo requerido")
     template_id = None
+    template_kind: str | None = None
     if body.get("template_id"):
         try:
             template_id = uuid.UUID(body["template_id"])
@@ -438,6 +456,17 @@ async def send_message(
         )).scalar_one_or_none()
         if ok_t is None:
             raise HTTPException(status_code=400, detail="Plantilla no encontrada")
+        template_kind = ok_t.kind
+
+    # Welcome templates use `{{ to.welcome_url }}` and need a fresh magic-link
+    # token per recipient. Detect either by template kind OR by placeholder
+    # presence in the raw body — both compose and direct send paths benefit.
+    needs_welcome_token = (
+        template_kind == "welcome"
+        or "to.welcome_url" in (subject_tpl + body_tpl)
+        or "to.welcome_ttl_days" in (subject_tpl + body_tpl)
+    )
+    app_url = await _resolve_app_url(db) if needs_welcome_token else ""
 
     recipients = (await db.execute(
         select(OrgMember).where(OrgMember.id.in_(rids), OrgMember.org_id == org.id)
@@ -465,15 +494,36 @@ async def send_message(
             recipient_has_password=bool(rec.hashed_password),
             organization=org,
         )
+        # Issue a fresh magic-link token if the template needs one.
+        # Rotates any previous token for this member — they ALWAYS get a fresh
+        # working link when re-invited.
+        if needs_welcome_token:
+            tok = _gen_token()
+            rec.password_reset_token = tok
+            rec.password_reset_expires_at = datetime.now(timezone.utc) + timedelta(days=WELCOME_TOKEN_TTL_DAYS)
+            ctx["to"]["welcome_url"] = f"{app_url}/set-password/{tok}"
+            ctx["to"]["welcome_ttl_days"] = WELCOME_TOKEN_TTL_DAYS
+
+        rendered_subject = render(subject_tpl, ctx)
+        rendered_body    = render(body_tpl, ctx)
+
+        # Fail-fast: if the template referenced welcome_url, the rendered body
+        # MUST contain the actual URL — otherwise we'd ship a dead button.
+        if needs_welcome_token and "/set-password/" not in rendered_body:
+            raise HTTPException(
+                status_code=500,
+                detail="La plantilla usa {{ to.welcome_url }} pero el enlace se perdió en el render. Revisa la plantilla.",
+            )
+
         m = EmailMessage(
             org_id=org.id, template_id=template_id,
             sender_member_id=(caller.id if caller else None),
             recipient_member_id=rec.id,
             recipient_email=rec.email, sender_email=sender_email,
             direction="sent",
-            status="queued",  # SMTP wiring will flip to 'sent' or 'failed'
-            subject=render(subject_tpl, ctx),
-            body_rendered=render(body_tpl, ctx),
+            status="queued",  # SMTP dispatcher flips to 'sent' or 'failed'
+            subject=rendered_subject,
+            body_rendered=rendered_body,
             body_template=body_tpl,
         )
         db.add(m)
@@ -531,20 +581,22 @@ async def list_person_messages(
 # Welcome flow (reusable from tenant_service_people)
 # ─────────────────────────────────────────────────────────────────────────────
 async def autoseed_default_templates(org_id: uuid.UUID, db: AsyncSession) -> None:
-    """Insert the default Welcome template for an org if it has none yet.
-    Idempotent — once any `welcome` template exists, no-op."""
-    existing = (await db.execute(
-        select(EmailTemplate).where(EmailTemplate.org_id == org_id, EmailTemplate.kind == "welcome").limit(1)
-    )).scalar_one_or_none()
-    if existing is not None:
-        return
-    db.add(EmailTemplate(
-        org_id=org_id, kind="welcome",
-        name="Bienvenida (por defecto)",
-        subject=DEFAULT_WELCOME_SUBJECT,
-        body=DEFAULT_WELCOME_BODY,
-        is_default=True,
-    ))
+    """Insert the default templates (welcome, password_reset) for an org if
+    it has none of that kind yet. Idempotent per-kind."""
+    seeds = [
+        ("welcome",        "Bienvenida (por defecto)",          DEFAULT_WELCOME_SUBJECT, DEFAULT_WELCOME_BODY),
+        ("password_reset", "Restablecer contraseña (por defecto)", DEFAULT_RESET_SUBJECT,   DEFAULT_RESET_BODY),
+    ]
+    for kind, name, subj, body in seeds:
+        existing = (await db.execute(
+            select(EmailTemplate).where(EmailTemplate.org_id == org_id, EmailTemplate.kind == kind).limit(1)
+        )).scalar_one_or_none()
+        if existing is not None:
+            continue
+        db.add(EmailTemplate(
+            org_id=org_id, kind=kind, name=name,
+            subject=subj, body=body, is_default=True,
+        ))
     await db.flush()
 
 
@@ -561,32 +613,34 @@ async def _resolve_app_url(db: AsyncSession) -> str:
     return (row.value if row and row.value else "http://10.211.55.11").rstrip("/")
 
 
-async def send_welcome_email(
-    *, org, recipient_member, sender_member, db: AsyncSession, background: BackgroundTasks,
+async def _send_magic_link_email(
+    *, kind: str, ttl: timedelta, org, recipient_member, sender_member,
+    db: AsyncSession, background: BackgroundTasks,
 ) -> tuple[uuid.UUID, str]:
-    """Issue a magic-link reset token + render the org's welcome template +
-    queue an email + schedule SMTP dispatch.
+    """Shared implementation for welcome + password-reset emails.
 
-    Returns (email_message_id, welcome_url). Idempotent on the membership row;
-    caller is responsible for blocking duplicate sends if desired.
+    kind:  'welcome' | 'password_reset' (drives which template to use)
+    ttl:   timedelta for the magic-link token (7d for welcome, 10min for reset)
+
+    Issues a fresh token (rotating any previous), renders the org's template
+    for that kind, queues an email row, schedules SMTP dispatch. Returns
+    (message_id, magic_link_url).
     """
-    # Ensure org has a welcome template (auto-seed default)
     await autoseed_default_templates(org.id, db)
     tpl = (await db.execute(
-        select(EmailTemplate).where(EmailTemplate.org_id == org.id, EmailTemplate.kind == "welcome")
+        select(EmailTemplate).where(EmailTemplate.org_id == org.id, EmailTemplate.kind == kind)
         .order_by(EmailTemplate.is_default.desc(), EmailTemplate.created_at.asc())
         .limit(1)
     )).scalar_one()
 
-    # Issue a fresh magic-link token (7d TTL). Overwrites any previous.
+    # Issue a fresh magic-link token. Overwrites any previous.
     token = _gen_token()
     recipient_member.password_reset_token = token
-    recipient_member.password_reset_expires_at = datetime.now(timezone.utc) + timedelta(days=WELCOME_TOKEN_TTL_DAYS)
+    recipient_member.password_reset_expires_at = datetime.now(timezone.utc) + ttl
 
     app_url = await _resolve_app_url(db)
-    welcome_url = f"{app_url}/set-password/{token}"
+    magic_url = f"{app_url}/set-password/{token}"
 
-    # Build render context. Use service_member role if any (else 'member').
     rsm = (await db.execute(
         select(ServiceMember).where(ServiceMember.member_id == recipient_member.id)
     )).scalar_one_or_none()
@@ -599,22 +653,19 @@ async def send_welcome_email(
         sender_signature_image=(sender_sm.signature_image if sender_sm else None),
         recipient_member=recipient_member,
         recipient_service_role=(rsm.service_role if rsm else None),
-        recipient_has_password=False,  # always false on welcome
+        recipient_has_password=bool(recipient_member.hashed_password),
         organization=org,
     )
-    # Inject welcome-specific vars
-    ctx["to"]["welcome_url"] = welcome_url
-    ctx["to"]["welcome_ttl_days"] = WELCOME_TOKEN_TTL_DAYS
+    ctx["to"]["welcome_url"]         = magic_url
+    ctx["to"]["welcome_ttl_days"]    = max(1, ttl.days)
+    ctx["to"]["welcome_ttl_minutes"] = max(1, int(ttl.total_seconds() // 60))
 
-    # Fail-fast: render the subject + body NOW (before insert) and verify the
-    # link survived substitution. If the URL got swallowed (corrupt template,
-    # engine bug, missing app_url) we abort instead of sending a broken email.
     subject = render(tpl.subject, ctx)
     body    = render(tpl.body, ctx)
-    if welcome_url not in body:
+    if magic_url not in body:
         raise RuntimeError(
-            f"Welcome render lost the link. Template missing {{{{ to.welcome_url }}}}? "
-            f"Edit the welcome template to include the placeholder."
+            f"Render perdió el enlace mágico para kind={kind!r}. "
+            f"Asegúrate de que la plantilla contiene {{{{ to.welcome_url }}}}."
         )
 
     sender_email = (sender_member.email if sender_member else (org.email or "")) or ""
@@ -624,12 +675,29 @@ async def send_welcome_email(
         recipient_member_id=recipient_member.id,
         recipient_email=recipient_member.email, sender_email=sender_email,
         direction="sent", status="queued",
-        subject=subject,
-        body_rendered=body,
-        body_template=tpl.body,
+        subject=subject, body_rendered=body, body_template=tpl.body,
     )
     db.add(m)
     await db.flush()
     mid = m.id
     background.add_task(dispatch_queued, [mid])
-    return mid, welcome_url
+    return mid, magic_url
+
+
+# Thin wrappers — convenient names for callers
+async def send_welcome_email(*, org, recipient_member, sender_member, db, background):
+    return await _send_magic_link_email(
+        kind="welcome",
+        ttl=timedelta(days=WELCOME_TOKEN_TTL_DAYS),
+        org=org, recipient_member=recipient_member, sender_member=sender_member,
+        db=db, background=background,
+    )
+
+
+async def send_password_reset_email(*, org, recipient_member, sender_member, db, background):
+    return await _send_magic_link_email(
+        kind="password_reset",
+        ttl=timedelta(minutes=RESET_TOKEN_TTL_MINUTES),
+        org=org, recipient_member=recipient_member, sender_member=sender_member,
+        db=db, background=background,
+    )

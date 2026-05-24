@@ -275,7 +275,15 @@ class MediaAsset(Base):
 
 
 class Team(Base):
-    """A volunteer team within an org (e.g. Alabanza, Audio/Visual)."""
+    """A volunteer team within an org (e.g. Alabanza, Audio/Visual).
+
+    Type flags (set via the create/edit modal):
+      is_rehearsal — gets access to song player / chord sheets / media files
+      is_secure    — only background-checked members may be scheduled here
+      is_split     — splits across multiple service times the same day
+    Leaders live in `team_leaders` (M2M). Service-type binding lives in
+    `service_teams` (existing M2M).
+    """
     __tablename__ = "teams"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -283,8 +291,23 @@ class Team(Base):
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     color: Mapped[str | None] = mapped_column(String(20), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_rehearsal: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_secure: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_split: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class TeamLeader(Base):
+    """A leader of a team. Leader != member — a leader coordinates the team
+    but may or may not also serve in it (track via team_memberships separately).
+    """
+    __tablename__ = "team_leaders"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False, index=True)
+    member_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("org_members.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
 
 
 class TeamMembership(Base):
@@ -520,3 +543,31 @@ class EmailMessage(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now(), index=True)
+
+
+class PlanAssignment(Base):
+    """A person assigned (requested) to participate in a specific service_plan.
+
+    The Phase-3 scheduler/cuadrante populates this table. Statuses:
+      pending   — assignment created, awaiting member response
+      confirmed — member accepted
+      declined  — member rejected (decline_reason optional)
+
+    `position` is free-text (e.g. "Piano", "Vocalista") — typically copied from
+    `team_memberships.role` at creation time so it survives role edits.
+    """
+    __tablename__ = "plan_assignments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    service_plan_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_plans.id", ondelete="CASCADE"), nullable=False, index=True)
+    member_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("org_members.id", ondelete="CASCADE"), nullable=False, index=True)
+    team_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="SET NULL"), nullable=True)
+    position: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    requested_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("org_members.id", ondelete="SET NULL"), nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decline_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

@@ -1225,6 +1225,65 @@ Send only the fields you want to change. Send `"image": null` to remove the curr
 | 400  | Imagen inválida (debe ser data URL base64 de tipo image/*) · Imagen inválida (base64 corrupto) · Imagen demasiado grande (máx. 1 MB) · Firma de texto demasiado larga (máx. 16 000 caracteres) |
 | 403  | Sin permiso para editar la firma |
 
+### Plan assignments (scheduling summary)
+
+Each row links one `org_member` to one `service_plan` with a status. Powers the "Resumen de programación" donut + upcoming-plans list on the person detail.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/tenant/{slug}/services/people/{sm_id}/assignments?range_from&range_to` | any member view-perm OR self | Summary + items in date range |
+| POST   | `/tenant/{slug}/services/people/{sm_id}/assignments` | admin/leader/coord/svc-editor | Create assignment |
+| PATCH  | `/tenant/{slug}/services/people/{sm_id}/assignments/{assignment_id}` | admin/coord OR the assigned person (self) | Update status (auto-stamps `responded_at` when changing to confirmed/declined) |
+| DELETE | `/tenant/{slug}/services/people/{sm_id}/assignments/{assignment_id}` | admin/leader/coord/svc-editor | Unassign |
+
+Status enum: `pending | confirmed | declined`.
+
+#### GET response
+
+```json
+{
+  "range": { "from": "2026-04-26", "to": null },
+  "summary": { "confirmed": 1, "pending": 1, "declined": 1, "total": 3 },
+  "items": [
+    {
+      "id": "uuid", "plan_id": "uuid",
+      "plan_title": "Servicio Dominical",
+      "service_type_id": "uuid", "service_type_name": "Servicio Dominical", "service_type_color": "#4F46E5",
+      "scheduled_at": "2026-06-02T09:00:00+00:00",
+      "team_id": "uuid", "team_name": "Equipo de Adoración", "team_color": "#4F46E5",
+      "position": "Piano",
+      "status": "pending",
+      "requested_at": "...", "responded_at": null, "decline_reason": null
+    }
+  ]
+}
+```
+
+Range presets the frontend uses: `upcoming` (today→∞), `1m/3m/6m/12m` (T-N months→today), `custom` (user-picked). Both ends optional — omit `range_from` for "since forever" or `range_to` for "into the future".
+
+#### POST body
+
+```json
+{
+  "service_plan_id": "uuid",
+  "team_id": "uuid",        // optional
+  "position": "Piano",
+  "status": "pending"       // default
+}
+```
+
+#### PATCH body
+
+```json
+{ "status": "confirmed" }
+// or
+{ "status": "declined", "decline_reason": "Estaré de viaje" }
+```
+
+`responded_at` is auto-stamped server-side when status flips to `confirmed` or `declined`. Self can update their own; admin/coord can update anyone's.
+
+Phase 3 producer: the cuadrante/scheduler will INSERT these rows automatically based on `service_times` + `service_teams` + each member's `scheduling.max_per_*` caps + `service_member_blockouts`.
+
 ### Teams of a person
 
 | Method | Path | Description |
