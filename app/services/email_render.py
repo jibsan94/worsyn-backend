@@ -109,6 +109,7 @@ def build_context(
     *,
     sender_member=None,        # OrgMember of who sent it (may be None for system)
     sender_signature: str | None = None,  # RAW signature template (may contain {{ to.* }} / {{ organization.* }})
+    sender_signature_image: str | None = None,  # data: URL base64 of the signature image (optional)
     recipient_member,           # OrgMember (mandatory — one msg per recipient)
     recipient_service_role: str | None = None,  # 'administrator' | … | None
     recipient_has_password: bool = False,
@@ -156,7 +157,19 @@ def build_context(
         "country": organization.country or "",
     }
     # Pre-render the signature with the same to/org buckets (no `from.*` allowed inside)
-    rendered_signature = render(sender_signature or "", {"to": to_dict, "organization": org_dict})
+    rendered_signature_text = render(sender_signature or "", {"to": to_dict, "organization": org_dict})
+    # Build the HTML signature: text with newlines→<br> + optional image embedded
+    # as a data URL (max 1 MB enforced upstream). `{{ from.signature }}` is
+    # substituted into an HTML body, so this needs to be HTML-safe.
+    sig_html_parts: list[str] = []
+    if rendered_signature_text:
+        sig_html_parts.append(rendered_signature_text.replace("\n", "<br>"))
+    if sender_signature_image:
+        sig_html_parts.append(
+            f'<br><img src="{sender_signature_image}" alt="firma" '
+            f'style="max-width:240px;height:auto;display:block;margin-top:8px"/>'
+        )
+    rendered_signature = "".join(sig_html_parts)
 
     return {
         "to": to_dict,
@@ -166,6 +179,7 @@ def build_context(
             "last_name": _last(from_full),
             "email": (sender_member.email if sender_member else (organization.email or "")) or "",
             "signature": rendered_signature,
+            "signature_image": sender_signature_image or "",
         },
         "organization": org_dict,
         "service": service or {},

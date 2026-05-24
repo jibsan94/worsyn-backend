@@ -1704,6 +1704,80 @@ CRUD, monthly reports, CSV/PDF export, integration with payment gateways (Stripe
 
 ## Settings
 
+### Email · SMTP (shared by all tenants)
+
+The Worsyn platform admin (owner only) configures **one SMTP server** that every tenant uses when its members send emails from Services. Password is encrypted at rest with Fernet (key from env `WORSYN_SETTINGS_KEY`). Returned password is always masked (`••••••••`).
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/admin/settings/email` | admin/owner (read) | Returns config (password masked) |
+| POST   | `/admin/settings/email` | **owner only** | Save config. Password: empty → clear · `••••••••` → keep existing · anything else → encrypt and store |
+| POST   | `/admin/settings/email/test` | admin/owner | Send a test email using saved config (or `override`) |
+
+#### GET response
+
+```json
+{
+  "enabled": true, "host": "smtp.gmail.com", "port": 587,
+  "username": "notificaciones@worsyn.com", "password": "••••••••", "has_password": true,
+  "use_tls": true, "use_ssl": false,
+  "from_email": "notificaciones@worsyn.com", "from_name": "Worsyn",
+  "provider": "gmail", "reply_to": "", "timeout": 20,
+  "readonly": false
+}
+```
+
+#### POST body
+
+Same shape as GET (minus `has_password` / `readonly`). For `password`: send `"••••••••"` to keep the saved value, `""` to clear, or a new plaintext to replace+encrypt.
+
+#### POST /test body
+
+```json
+{
+  "to": "tu-cuenta@ejemplo.com",
+  "override": { "host": "...", "port": 587, "username": "...", "password": "••••••••",
+                "use_tls": true, "use_ssl": false, "from_email": "...", "from_name": "..." }
+}
+```
+
+`override` is optional. With it the test uses form-state values without saving; without it the saved config is used. Returns `{ "status": "ok", "to": "..." }` or `502 { "detail": "Envío falló: <SMTP error>" }`.
+
+#### Provider enum
+
+`provider` ∈ `gmail | workspace | outlook | sendgrid | mailgun | custom`. Informational — the UI uses it to prefill `host`/`port`/`use_tls`.
+
+#### Errors
+
+| Code | Detail |
+|------|--------|
+| 400  | Provider inválido · Puerto inválido · No actives STARTTLS y SSL al mismo tiempo · Configuración SMTP incompleta · Email destino inválido |
+| 403  | Solo el owner puede modificar |
+| 502  | Envío falló: `<SMTP error>` |
+
+### Tenant email dispatch (queued → sent/failed)
+
+When a tenant member calls `POST /tenant/{slug}/email/messages`, the server:
+
+1. Renders subject + body **per recipient**
+2. Stores rows with `status="queued"`
+3. Returns 201 with the created rows
+4. Schedules `dispatch_queued()` as a **FastAPI BackgroundTask** — opens its own DB session, loads `SmtpConfig`, opens ONE SMTP connection per batch, iterates rows:
+   - Success → `status='sent'`, `sent_at=<now>`, `error=null`
+   - Failure → `status='failed'`, `error="<ExceptionType>: <msg>"`
+5. If SMTP isn't configured/disabled → all rows marked `failed` with reason `"SMTP no configurado en el panel admin"`
+
+**From / Reply-To convention** (matches Gmail/Workspace requirements):
+- `From` = `"<org_name> vía <smtp.from_name>" <smtp.from_email>` (the SMTP-authenticated identity)
+- `Reply-To` = sender member's email (replies route back to the actual person)
+- `email.smtp.reply_to` overrides if you want all replies to a single mailbox
+
+Worker (Phase 3): swap BackgroundTasks for a Redis queue + dedicated worker once volume exceeds ~1k/day.
+
+See [`EMAIL-VARIABLES.md`](./EMAIL-VARIABLES.md) for the template variable catalog and the [`worsyn-smtp`](../../.claude/skills/worsyn-smtp/SKILL.md) agent skill for provider setup + debugging.
+
+---
+
 ### GET /admin/settings/database
 Get current database configuration.  
 `readonly: true` is returned for `admin` role — they cannot write.

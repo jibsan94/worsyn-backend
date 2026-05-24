@@ -90,7 +90,7 @@ All values are read at send time. Missing or null → empty string.
 | `from.email` | str | `jibsan@iglesia.com` | Sender email (falls back to `organization.email` for system mail) |
 | `from.signature` | str | `Jibsan Rosa\nLíder de Alabanza\n…` | Text signature configured by sender. **Renders multi-line** — preserves `\n` |
 
-> The signature **image** (`signature_image`) is attached separately as an HTML inline image — not exposed as a `{{ from.signature_image }}` variable yet. Phase 3 will inject it via the HTML renderer.
+**Signature image**: stored separately (`service_members.signature_image`, base64 data URL ≤1 MB). At send time the engine builds `{{ from.signature }}` as HTML = `<text with \n→<br>>` + (optional) `<img src="data:..." style="max-width:240px"/>`. So a single substitution gives you the full block. The raw data URL is also exposed as `{{ from.signature_image }}` if you want to place it elsewhere (e.g. inside a header layout).
 
 #### Signature is itself a template
 

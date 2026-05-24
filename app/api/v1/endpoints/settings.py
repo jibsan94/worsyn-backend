@@ -75,12 +75,15 @@ async def _get_settings_by_prefix(prefix: str, defaults: dict, db: AsyncSession)
 
 async def _upsert_settings(updates: dict[str, str], db: AsyncSession) -> None:
     for key, value in updates.items():
+        is_secret = key.endswith(".password") or "_password" in key
         result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
         row = result.scalar_one_or_none()
         if row:
             row.value = value
+            if is_secret and not row.encrypted:
+                row.encrypted = True
         else:
-            db.add(SystemSetting(key=key, value=value))
+            db.add(SystemSetting(key=key, value=value, encrypted=is_secret))
     await db.commit()
 
 
@@ -235,3 +238,177 @@ async def save_security_config(
     await log_action(db, user, "settings.security.save", "settings", None, "security",
                      {"require_2fa": payload.require_2fa, "sso_enabled": payload.sso_enabled})
     return {"status": "saved"}
+
+
+# ── Email / SMTP ──────────────────────────────────────────────────────────────
+# Shared SMTP server used by every tenant when sending emails from Services.
+# Password is encrypted via app.core.crypto (Fernet). The GET endpoint returns
+# the password masked; pass it back to leave it untouched on save.
+
+from app.core.crypto import encrypt, decrypt  # noqa: E402
+from app.services.smtp import CFG_KEYS, SmtpConfig, send_one, load_config  # noqa: E402
+
+EMAIL_DEFAULTS: dict[str, str] = {
+    "email.smtp.enabled": "false",
+    "email.smtp.host": "",
+    "email.smtp.port": "587",
+    "email.smtp.username": "",
+    "email.smtp.password": "",   # encrypted
+    "email.smtp.use_tls": "true",
+    "email.smtp.use_ssl": "false",
+    "email.smtp.from_email": "",
+    "email.smtp.from_name": "Worsyn",
+    "email.smtp.provider": "custom",
+    "email.smtp.reply_to": "",
+    "email.smtp.timeout": "20",
+}
+
+PASSWORD_MASK = "••••••••"
+
+
+@router.get("/email")
+async def get_email_config(
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_role("admin", "owner")),
+):
+    """Return SMTP config. Password is replaced by a mask (••••••••) when set."""
+    s = await _get_settings_by_prefix("email", EMAIL_DEFAULTS, db)
+    has_password = bool(s.get("email.smtp.password"))
+    return {
+        "enabled":   s["email.smtp.enabled"] == "true",
+        "host":      s["email.smtp.host"],
+        "port":      int(s["email.smtp.port"] or 587),
+        "username":  s["email.smtp.username"],
+        "password":  PASSWORD_MASK if has_password else "",
+        "has_password": has_password,
+        "use_tls":   s["email.smtp.use_tls"] == "true",
+        "use_ssl":   s["email.smtp.use_ssl"] == "false" and False or (s["email.smtp.use_ssl"] == "true"),
+        "from_email": s["email.smtp.from_email"],
+        "from_name":  s["email.smtp.from_name"],
+        "provider":   s["email.smtp.provider"],
+        "reply_to":   s["email.smtp.reply_to"],
+        "timeout":    int(s["email.smtp.timeout"] or 20),
+        "readonly":   user.role != "owner",
+    }
+
+
+_MISSING = object()
+
+
+def _resolve_password(incoming, existing_enc: str) -> str:
+    """Decide which encrypted password to store given the incoming form value.
+
+      _MISSING / None / PASSWORD_MASK → keep existing (DON'T wipe on no-op saves)
+      ""                              → explicit clear
+      any other plain string          → encrypt and store
+    """
+    if incoming is _MISSING or incoming is None or incoming == PASSWORD_MASK:
+        return existing_enc
+    if incoming == "":
+        return ""
+    return encrypt(incoming)
+
+
+@router.post("/email")
+async def save_email_config(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_role("owner")),
+):
+    """Owner only: save the shared SMTP config."""
+    # Load existing for password preservation
+    existing = await _get_settings_by_prefix("email", EMAIL_DEFAULTS, db)
+    provider = (payload.get("provider") or "custom").lower()
+    if provider not in {"gmail", "workspace", "sendgrid", "mailgun", "outlook", "custom"}:
+        raise HTTPException(status_code=400, detail=f"Provider inválido: {provider}")
+    use_tls = bool(payload.get("use_tls", True))
+    use_ssl = bool(payload.get("use_ssl", False))
+    if use_tls and use_ssl:
+        raise HTTPException(status_code=400, detail="No actives STARTTLS y SSL al mismo tiempo")
+    try:
+        port = int(payload.get("port") or 587)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Puerto inválido")
+    try:
+        timeout = int(payload.get("timeout") or 20)
+    except (TypeError, ValueError):
+        timeout = 20
+
+    pwd_enc = _resolve_password(payload.get("password", _MISSING), existing.get("email.smtp.password", ""))
+
+    updates = {
+        "email.smtp.enabled":    str(bool(payload.get("enabled", False))).lower(),
+        "email.smtp.host":       (payload.get("host") or "").strip(),
+        "email.smtp.port":       str(port),
+        "email.smtp.username":   (payload.get("username") or "").strip(),
+        "email.smtp.password":   pwd_enc,
+        "email.smtp.use_tls":    str(use_tls).lower(),
+        "email.smtp.use_ssl":    str(use_ssl).lower(),
+        "email.smtp.from_email": (payload.get("from_email") or "").strip(),
+        "email.smtp.from_name":  (payload.get("from_name") or "Worsyn").strip(),
+        "email.smtp.provider":   provider,
+        "email.smtp.reply_to":   (payload.get("reply_to") or "").strip(),
+        "email.smtp.timeout":    str(timeout),
+    }
+    await _upsert_settings(updates, db)
+    await log_action(db, user, "settings.email.save", "settings", None, "email",
+                     {"host": updates["email.smtp.host"], "enabled": updates["email.smtp.enabled"]})
+    return {"status": "saved"}
+
+
+@router.post("/email/test")
+async def test_email_config(
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    user: AdminUser = Depends(require_role("admin", "owner")),
+):
+    """Send a test email using either the SAVED config or the payload below.
+
+    Body:
+      to: <recipient email>          (required)
+      override: { host, port, username, password, use_tls, use_ssl, from_email, from_name }
+        (optional — if present, uses these instead of saved settings; password
+         can be PASSWORD_MASK to use the saved one)
+    """
+    to = (payload.get("to") or "").strip()
+    if "@" not in to:
+        raise HTTPException(status_code=400, detail="Email destino inválido")
+
+    # Build a config: start from saved, optionally overlay user-provided overrides
+    existing = await _get_settings_by_prefix("email", EMAIL_DEFAULTS, db)
+    raw = dict(existing)
+    ov = payload.get("override") or {}
+    if ov:
+        if "host" in ov:       raw["email.smtp.host"] = (ov["host"] or "").strip()
+        if "port" in ov:       raw["email.smtp.port"] = str(ov["port"])
+        if "username" in ov:   raw["email.smtp.username"] = (ov["username"] or "").strip()
+        if "use_tls" in ov:    raw["email.smtp.use_tls"] = str(bool(ov["use_tls"])).lower()
+        if "use_ssl" in ov:    raw["email.smtp.use_ssl"] = str(bool(ov["use_ssl"])).lower()
+        if "from_email" in ov: raw["email.smtp.from_email"] = (ov["from_email"] or "").strip()
+        if "from_name" in ov:  raw["email.smtp.from_name"] = (ov["from_name"] or "Worsyn").strip()
+        if "password" in ov and ov["password"]:
+            raw["email.smtp.password"] = (
+                existing.get("email.smtp.password", "") if ov["password"] == PASSWORD_MASK
+                else encrypt(ov["password"])
+            )
+        # Force enable for the test
+        raw["email.smtp.enabled"] = "true"
+
+    cfg = SmtpConfig(raw)
+    if not cfg.is_configured():
+        raise HTTPException(status_code=400, detail="Configuración SMTP incompleta (host, usuario, contraseña, from_email)")
+
+    ok, err = send_one(
+        cfg, to_email=to,
+        subject="Worsyn — Prueba de configuración SMTP",
+        html=(
+            "<h2>¡Conexión SMTP correcta!</h2>"
+            "<p>Este correo de prueba se envió desde Worsyn usando la configuración SMTP guardada en el panel.</p>"
+            f"<p style='color:#64748B; font-size:13px'>Host: {cfg.host}:{cfg.port} · Usuario: {cfg.username}</p>"
+        ),
+    )
+    await log_action(db, user, "settings.email.test", "settings", None, "email",
+                     {"to": to, "ok": ok, "error": err})
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"Envío falló: {err}")
+    return {"status": "ok", "to": to}

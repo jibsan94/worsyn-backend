@@ -19,7 +19,9 @@ Variable engine docs → `artifacts/EMAIL-VARIABLES.md`.
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, Header, HTTPException, status
+
+from app.services.smtp import dispatch_queued
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -251,8 +253,9 @@ async def preview_message(
         select(ServiceMember).where(ServiceMember.member_id == caller.id)
     )).scalar_one_or_none() if caller else None
     sig = (sender_sm.signature_text if sender_sm else "") or ""
+    sig_img = (sender_sm.signature_image if sender_sm else None)
     ctx = build_context(
-        sender_member=caller, sender_signature=sig,
+        sender_member=caller, sender_signature=sig, sender_signature_image=sig_img,
         recipient_member=recipient,
         recipient_service_role=(rsm.service_role if rsm else None),
         recipient_has_password=bool(recipient.hashed_password),
@@ -317,6 +320,7 @@ async def get_message(
 @router.post("/messages", status_code=201)
 async def send_message(
     slug: str, body: dict,
+    background: BackgroundTasks,
     authorization: str | None = Header(default=None),
     tenant_access: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
@@ -371,6 +375,7 @@ async def send_message(
         select(ServiceMember).where(ServiceMember.member_id == caller.id)
     )).scalar_one_or_none() if caller else None
     sender_sig = (sender_sm.signature_text if sender_sm else None) or ""
+    sender_sig_img = (sender_sm.signature_image if sender_sm else None)
     sender_email = (caller.email if caller else (org.email or "")) or ""
 
     created: list[EmailMessage] = []
@@ -382,7 +387,7 @@ async def send_message(
             select(ServiceMember).where(ServiceMember.member_id == rec.id)
         )).scalar_one_or_none()
         ctx = build_context(
-            sender_member=caller, sender_signature=sender_sig,
+            sender_member=caller, sender_signature=sender_sig, sender_signature_image=sender_sig_img,
             recipient_member=rec,
             recipient_service_role=(rsm.service_role if rsm else None),
             recipient_has_password=bool(rec.hashed_password),
@@ -404,6 +409,11 @@ async def send_message(
     await db.flush()
     for m in created:
         await db.refresh(m)
+    # Capture IDs BEFORE the request session closes — the BackgroundTask opens
+    # its own session and may not see the rows otherwise. Commit before scheduling.
+    msg_ids = [m.id for m in created]
+    await db.commit()
+    background.add_task(dispatch_queued, msg_ids)
     return await _enrich_messages(created, db)
 
 

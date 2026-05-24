@@ -163,6 +163,17 @@ email_messages       — log de envíos/recepciones por organización
   error TEXT nullable, sent_at, created_at (indexed)
   Retención: organizations.email_retention_months (default 3, max 12)
   Render: app/services/email_render.py — soporta {{var}} + {%if%}{%endif%}
+  Despacho: FastAPI BackgroundTask (`app/services/smtp.dispatch_queued`)
+    abre su propia AsyncSessionLocal, flippea status queued→sent/failed
+system_settings — claves SMTP a nivel plataforma (compartido por todos los tenants)
+  email.smtp.enabled (bool), email.smtp.host, email.smtp.port (default 587),
+  email.smtp.username, email.smtp.password (Fernet-encrypted en `value`, `encrypted=true`),
+  email.smtp.use_tls (STARTTLS), email.smtp.use_ssl (implícito),
+  email.smtp.from_email, email.smtp.from_name (default 'Worsyn'),
+  email.smtp.provider (gmail|workspace|outlook|sendgrid|mailgun|custom),
+  email.smtp.reply_to (override opcional), email.smtp.timeout (segundos)
+  Cifrado: Fernet (AES-128+HMAC), clave en env WORSYN_SETTINGS_KEY
+  Endpoints: GET/POST /api/v1/admin/settings/email + POST /test (owner only para escritura)
   welcomed_at (ts nullable), password_set_at (ts nullable),
   created_at, updated_at
 service_member_type_perms — override por tipo de servicio (Same-as-parent)

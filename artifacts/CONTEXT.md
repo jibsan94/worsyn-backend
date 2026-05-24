@@ -226,6 +226,12 @@ Cuando `must_change_password: true`:
 - [x] **Compose modal**: selector de plantilla + To: + Asunto + Cuerpo con VariablePicker en ambos campos + botón Vista previa (render server-side) + Enviar (queues sin SMTP)
 - [x] **Templates manager**: 4 tabs (General/Programación/Hojas inscripción/Bienvenida) con CRUD inline, editor con VariablePicker
 - [x] **Compatibilidad Planning Center**: `{{ to.max_plan_permissions_s }}` y `{{ from.signature }}` funcionan igual que en PCO; plantillas exportadas de PCO funcionan sin cambios
+- [x] **SMTP a nivel plataforma (Worsyn Admin)** — `system_settings` con claves `email.smtp.*`, contraseña cifrada con **Fernet** (env `WORSYN_SETTINGS_KEY`). Owner-only para escritura, admin+owner para lectura/test
+- [x] Endpoints admin: `GET/POST /api/v1/admin/settings/email` + `POST /admin/settings/email/test` (con `override` opcional para iterar sin guardar)
+- [x] Servicio `app/services/smtp.py` con `SmtpConfig`, `send_one()` y `dispatch_queued()` (BG task). Soporta STARTTLS (587) e SSL implícito (465), texto plano fallback + HTML alt, From dual (org + worsyn) y Reply-To al miembro tenant
+- [x] Envío real wired: `POST /tenant/{slug}/email/messages` ahora agenda `BackgroundTask(dispatch_queued, ids)` después de crear filas — status `queued` → `sent` / `failed` con `error` cuando aplica
+- [x] UI admin `SettingsEmail.tsx` rediseñada: selector de proveedor (Gmail / Workspace / Outlook / SendGrid / Mailgun / Custom) con presets de host/puerto, formulario completo (host, puerto, usuario, contraseña cifrada con máscara `••••••••`, STARTTLS/SSL, from + reply-to), botón "Probar envío" usando valores del form (no guardados)
+- [x] Skill `worsyn-smtp` (`.claude/skills/worsyn-smtp/SKILL.md`) — especialista en configuración por proveedor, diagnóstico de errores SMTP, rotación de clave Fernet, deliverability (SPF/DKIM/DMARC) y mejoras pendientes (worker dedicado, retry con backoff, OAuth2 XOAUTH2)
 
 ## Roles de OrgMember
 
