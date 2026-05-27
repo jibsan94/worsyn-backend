@@ -52,6 +52,7 @@ SECURITY_DEFAULTS: dict[str, str] = {
     "security.session_access_token_minutes": "30",
     "security.session_refresh_token_days": "7",
     "security.max_sessions_per_user": "0",
+    "security.password_reset_ttl_minutes": "10",
     "security.require_2fa": "false",
     # SSO / Active Directory (pending implementation)
     "security.sso_enabled": "false",
@@ -196,6 +197,7 @@ async def get_security_config(
         session_access_token_minutes=int(s["security.session_access_token_minutes"]),
         session_refresh_token_days=int(s["security.session_refresh_token_days"]),
         max_sessions_per_user=int(s["security.max_sessions_per_user"]),
+        password_reset_ttl_minutes=int(s["security.password_reset_ttl_minutes"]),
         require_2fa=s["security.require_2fa"] == "true",
         sso_enabled=s["security.sso_enabled"] == "true",
         sso_provider=s["security.sso_provider"],
@@ -225,6 +227,7 @@ async def save_security_config(
         "security.session_access_token_minutes": str(payload.session_access_token_minutes),
         "security.session_refresh_token_days": str(payload.session_refresh_token_days),
         "security.max_sessions_per_user": str(payload.max_sessions_per_user),
+        "security.password_reset_ttl_minutes": str(payload.password_reset_ttl_minutes),
         "security.require_2fa": str(payload.require_2fa).lower(),
         "security.sso_enabled": str(payload.sso_enabled).lower(),
         "security.sso_provider": payload.sso_provider,

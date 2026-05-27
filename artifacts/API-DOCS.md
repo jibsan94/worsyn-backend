@@ -1424,6 +1424,8 @@ A Team groups org_members for service assignments (Adoración, Audio/Visual, Rec
 | POST   | `/tenant/{slug}/teams` | admin/leader | Create team (auto-adds caller as leader if `leader_member_ids` omitted/empty) |
 | PATCH  | `/tenant/{slug}/teams/{team_id}` | admin/leader | Update name/color/description/flags + settings (default_status, notify_on_prepare, replies_to, gap_alerts_enabled, last_scheduled_date_rule, scheduled_viewer_access, signup_sheets_auto_enable, reschedule_on_decline); **replaces** `leader_member_ids[]`, `service_type_ids[]`, `related_team_ids[]` when provided |
 | DELETE | `/tenant/{slug}/teams/{team_id}` | admin/leader | Cascade-deletes memberships, leaders, service_teams links |
+| POST   | `/tenant/{slug}/teams/{team_id}/leaders` | admin/leader | Add ONE leader. Body: `{ member_id }`. Idempotent. |
+| DELETE | `/tenant/{slug}/teams/{team_id}/leaders/{member_id}` | admin/leader | Remove ONE leader. **409** if team would be left without leaders; the caller cannot self-remove when last. |
 | GET    | `/tenant/{slug}/teams/{team_id}/members` | JWT or cookie | List memberships (joins `org_members` for name/email) |
 | POST   | `/tenant/{slug}/teams/{team_id}/members` | admin/leader | Add a member to the team — body: `{ member_id, role? }` |
 | DELETE | `/tenant/{slug}/teams/{team_id}/members/{member_id}` | admin/leader | Remove member from team |
@@ -1477,6 +1479,19 @@ PATCH dropea silently: ids no-UUID, ids de otro org, y `team_id` propio en
 filtrar UUIDs válidos del mismo org queda 0, devuelve `400 — "Selecciona al
 menos un tipo de servicio."` Frontend bloquea el botón Guardar y deshabilita el
 × del último chip restante.
+
+**PATCH /services/people/{sm_id} acepta `is_active`** (bool, admin-only):
+deshabilita o reactiva al `org_member` ligado. Una persona deshabilitada no
+podrá hacer login ni recibir correos hasta ser reactivada. Self-disable
+bloqueada (`400 — "No puedes deshabilitarte a ti mismo"`). Serialize de
+Services incluye `is_active`.
+
+**Admin · settings · seguridad — TTL del enlace de recuperación.** Nueva clave
+`security.password_reset_ttl_minutes` (default `10`, clamp aplicado en runtime
+a [1, 1440]). Endpoints `GET/POST /admin/settings/security` aceptan el campo
+`password_reset_ttl_minutes` (int). `tenant_email._resolve_reset_ttl_minutes`
+es la única fuente al construir `send_password_reset_email` → la duración del
+botón "Restablece tu contraseña" se controla desde el panel admin.
 
 ### Response
 
@@ -1568,6 +1583,12 @@ Used by the team detail view in the tenant portal. Positions are named roles ins
 ---
 
 ## Tenant · Email
+
+**Template kinds:** `general` · `schedule` · `signup` · `welcome` · `password_reset` · `team_welcome`.
+The `team_welcome` template is auto-seeded per org and used when a member already in Services is added to a new team. Variables: `{{ team.name }}`, `{{ team.recipient_positions }}` (HTML `<ul>` of the recipient's positions in that team), `{{ team.leaders }}` (HTML `<ul>` mailto-linked), `{{ team.positions }}` (HTML `<ul>` of all team positions), `{{ from.team_role }}` (Líder de equipo / Administrador).
+
+**Permission gate for team-scoped sends:** `POST /messages` and `/messages/preview` accept an optional `team_id` in the body. When provided, the caller MUST be an `admin` of the org OR a leader of that team (`team_leaders` row) — otherwise HTTP 403. The endpoint then computes `team.recipient_positions` per-recipient (positions of that member inside the team) and exposes `sender_team_role` based on the caller.
+
 
 Per-org templates + message log + send-rendered. SMTP is **not wired yet** — new sends are persisted with `status="queued"` so the future worker (worsyn-integrations) can flush them. The variable engine is documented at length in [`EMAIL-VARIABLES.md`](./EMAIL-VARIABLES.md).
 

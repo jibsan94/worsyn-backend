@@ -310,6 +310,76 @@ async def delete_team(
     await db.delete(t)
 
 
+# ── Leaders (single-op endpoints) ─────────────────────────────────────────────
+# PATCH /teams/{id} with leader_member_ids[] already exists for replace-all.
+# These let the UI add/remove one without re-sending the whole list and apply
+# the "team must always have ≥1 leader" + "leader cannot self-remove if last".
+
+@router.post("/{team_id}/leaders", status_code=201)
+async def add_team_leader(
+    slug: str, team_id: str, body: dict,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Body: { member_id }. Idempotent — already-present returns 200 silently."""
+    org, _, role = await _auth(slug, authorization, tenant_access, db)
+    _require_priv(role)
+    t = await _team(team_id, org.id, db)
+    try:
+        mid = uuid.UUID(body.get("member_id") or "")
+    except Exception:
+        raise HTTPException(status_code=400, detail="member_id inválido")
+    om = (await db.execute(
+        select(OrgMember).where(OrgMember.id == mid, OrgMember.org_id == org.id)
+    )).scalar_one_or_none()
+    if om is None:
+        raise HTTPException(status_code=404, detail="Miembro no encontrado")
+    dup = (await db.execute(
+        select(TeamLeader).where(TeamLeader.team_id == t.id, TeamLeader.member_id == mid)
+    )).scalar_one_or_none()
+    if dup is None:
+        db.add(TeamLeader(team_id=t.id, member_id=mid))
+        await db.flush()
+    return await _serialize_team(t, db)
+
+
+@router.delete("/{team_id}/leaders/{member_id}", status_code=200)
+async def remove_team_leader(
+    slug: str, team_id: str, member_id: str,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Guards:
+      - team must keep ≥1 leader (cannot remove the last one)
+      - a leader cannot remove themselves unless another leader exists
+    """
+    org, caller, role = await _auth(slug, authorization, tenant_access, db)
+    _require_priv(role)
+    t = await _team(team_id, org.id, db)
+    try:
+        mid = uuid.UUID(member_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="member_id inválido")
+    leaders = (await db.execute(
+        select(TeamLeader).where(TeamLeader.team_id == t.id)
+    )).scalars().all()
+    leader_ids = {x.member_id for x in leaders}
+    if mid not in leader_ids:
+        raise HTTPException(status_code=404, detail="Líder no encontrado en este equipo")
+    if len(leader_ids) <= 1:
+        raise HTTPException(status_code=409, detail="El equipo debe tener al menos un líder")
+    if caller is not None and caller.id == mid:
+        # Self-removal allowed only if another leader exists (already validated above).
+        pass
+    target = next((x for x in leaders if x.member_id == mid), None)
+    if target is not None:
+        await db.delete(target)
+    await db.flush()
+    return await _serialize_team(t, db)
+
+
 # ── Memberships ───────────────────────────────────────────────────────────────
 @router.get("/{team_id}/members")
 async def list_team_members(

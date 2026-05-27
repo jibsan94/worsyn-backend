@@ -150,6 +150,7 @@ async def _serialize(sm: ServiceMember, om: OrgMember, db: AsyncSession) -> dict
             "image": sm.signature_image,  # full data: URL or null
         },
         "preferred_notif_app": sm.preferred_notif_app,
+        "is_active": om.is_active,
         # TEST-ONLY — plaintext password stored for local QA. Remove before prod.
         "debug_password": sm.debug_password,
     }
@@ -401,6 +402,14 @@ async def update_service_person(
         if v not in ("servicios", "worsyn"):
             raise HTTPException(status_code=400, detail="preferred_notif_app inválido")
         sm.preferred_notif_app = v
+
+    if "is_active" in body:
+        # Admin-only (already gated by self_editable split above).
+        # Self-disable is not allowed — prevents the only admin from locking themselves out.
+        new_active = bool(body["is_active"])
+        if not new_active and caller is not None and caller.id == om.id:
+            raise HTTPException(status_code=400, detail="No puedes deshabilitarte a ti mismo")
+        om.is_active = new_active
 
     if "type_permissions" in body and isinstance(body["type_permissions"], list):
         existing = (await db.execute(

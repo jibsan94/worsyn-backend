@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response, status
 from jose import jwt
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -232,10 +232,11 @@ async def _get_member_or_404(db: AsyncSession, org_id: uuid.UUID, member_id: uui
 @router.get("/{slug}/members", response_model=list[OrgMemberRead])
 async def list_members(slug: str, db: AsyncSession = Depends(get_db)):
     org = await _get_org_by_slug(db, slug)
+    # Alphabetical by full_name (case-insensitive), nulls last via email fallback.
     result = await db.execute(
         select(OrgMember)
         .where(OrgMember.org_id == org.id)
-        .order_by(OrgMember.joined_at)
+        .order_by(func.lower(func.coalesce(OrgMember.full_name, OrgMember.email)))
     )
     return result.scalars().all()
 

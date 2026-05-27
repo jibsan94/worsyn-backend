@@ -307,6 +307,7 @@ class SecurityConfigRead(BaseModel):
     session_access_token_minutes: int = 30
     session_refresh_token_days: int = 7
     max_sessions_per_user: int = 0
+    password_reset_ttl_minutes: int = 10
     require_2fa: bool = False
     # SSO / Active Directory — pending implementation
     sso_enabled: bool = False
@@ -328,6 +329,7 @@ class SecurityConfigWrite(BaseModel):
     session_access_token_minutes: int = 30
     session_refresh_token_days: int = 7
     max_sessions_per_user: int = 0
+    password_reset_ttl_minutes: int = 10
     require_2fa: bool = False
     # SSO / Active Directory
     sso_enabled: bool = False

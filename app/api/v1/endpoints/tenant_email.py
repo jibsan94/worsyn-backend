@@ -80,6 +80,31 @@ DEFAULT_WELCOME_BODY = """<p>Hola {{ to.name }},</p>
 
 <p style="margin-top: 24px;">{{ from.signature }}</p>
 """
+
+# Default team_welcome template — sent when a member already in Services is
+# added to a new team. Variables: team.name, team.positions (HTML <ul>),
+# team.leaders (HTML <ul>), from.team_role, from.name, organization.name.
+DEFAULT_TEAM_WELCOME_SUBJECT = "Bienvenido a tu nuevo equipo en {{ organization.name }}"
+DEFAULT_TEAM_WELCOME_BODY = """<p>Enhorabuena {{ to.first_name }},</p>
+
+<p>Has sido agregado al siguiente equipo:</p>
+<ul><li><strong>{{ team.name }}</strong></li></ul>
+
+<p>Y desempeñarás los siguientes roles:</p>
+{{ team.recipient_positions }}
+
+<p>Tienes a tu disposición los siguientes líderes para cualquier duda:</p>
+{{ team.leaders }}
+
+<p>Esperamos que puedas aportar tus dones y talentos al equipo y juntos podamos llevar a la Iglesia a una adoración centrada en Cristo.</p>
+
+<p>Muchas bendiciones,<br/>
+{{ from.name }}<br/>
+<em>{{ from.team_role }}</em><br/>
+{{ organization.name }}</p>
+
+<p style="margin-top: 18px;">{{ from.signature }}</p>
+"""
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,7 +118,7 @@ from app.services.email_render import build_context, render
 router = APIRouter(prefix="/tenant/{slug}/email", tags=["Tenant · Email"])
 people_router = APIRouter(prefix="/tenant/{slug}/services/people", tags=["Tenant · Service People · Messages"])
 
-VALID_KINDS = {"general", "schedule", "signup", "welcome", "password_reset"}
+VALID_KINDS = {"general", "schedule", "signup", "welcome", "password_reset", "team_welcome"}
 
 
 # ── Auth helper (mirror of service_people._auth) ──────────────────────────────
@@ -313,12 +338,53 @@ async def preview_message(
     )).scalar_one_or_none() if caller else None
     sig = (sender_sm.signature_text if sender_sm else "") or ""
     sig_img = (sender_sm.signature_image if sender_sm else None)
+    # Optional team preview context
+    from app.models.models import (
+        Team as _Team, TeamLeader as _TL, TeamPosition as _TP, TeamPositionMember as _TPM,
+    )
+    team_payload = None
+    sender_team_role = ""
+    if body.get("team_id"):
+        try:
+            tid = uuid.UUID(body["team_id"])
+        except Exception:
+            raise HTTPException(status_code=400, detail="team_id inválido")
+        team_obj = (await db.execute(
+            select(_Team).where(_Team.id == tid, _Team.org_id == org.id)
+        )).scalar_one_or_none()
+        if team_obj is not None:
+            positions = [n for n in (await db.execute(
+                select(_TP.name).where(_TP.team_id == tid).order_by(_TP.sort_order, _TP.name)
+            )).scalars().all()]
+            leaders = [
+                {"full_name": om.full_name, "email": om.email}
+                for _l, om in (await db.execute(
+                    select(_TL, OrgMember).join(OrgMember, OrgMember.id == _TL.member_id)
+                    .where(_TL.team_id == tid).order_by(OrgMember.full_name)
+                )).all()
+            ]
+            rec_positions = [n for n in (await db.execute(
+                select(_TP.name).join(_TPM, _TPM.position_id == _TP.id)
+                .where(_TP.team_id == tid, _TPM.member_id == recipient.id).order_by(_TP.sort_order, _TP.name)
+            )).scalars().all()]
+            team_payload = {
+                "name": team_obj.name, "color": team_obj.color or "",
+                "positions": positions, "leaders": leaders, "recipient_positions": rec_positions,
+            }
+            if caller is not None:
+                is_admin = org_role == "admin"
+                is_leader = (await db.execute(
+                    select(_TL).where(_TL.team_id == tid, _TL.member_id == caller.id)
+                )).scalar_one_or_none() is not None
+                sender_team_role = "Líder de equipo" if is_leader else ("Administrador" if is_admin else "")
     ctx = build_context(
         sender_member=caller, sender_signature=sig, sender_signature_image=sig_img,
         recipient_member=recipient,
         recipient_service_role=(rsm.service_role if rsm else None),
         recipient_has_password=bool(recipient.hashed_password),
         organization=org,
+        team=team_payload,
+        sender_team_role=sender_team_role,
     )
     return {
         "subject": render(body.get("subject") or "", ctx),
@@ -468,6 +534,54 @@ async def send_message(
     )
     app_url = await _resolve_app_url(db) if needs_welcome_token else ""
 
+    # Optional team context (used by team_welcome and team-scoped emails).
+    # Enforces: only team leaders or org admins may email a team's roster.
+    from app.models.models import (
+        Team as _Team, TeamLeader as _TL, TeamPosition as _TP, TeamPositionMember as _TPM,
+    )
+    team_obj = None
+    team_positions_names: list[str] = []
+    team_leaders_payload: list[dict] = []
+    sender_team_role: str = ""
+    if body.get("team_id"):
+        try:
+            tid = uuid.UUID(body["team_id"])
+        except Exception:
+            raise HTTPException(status_code=400, detail="team_id inválido")
+        team_obj = (await db.execute(
+            select(_Team).where(_Team.id == tid, _Team.org_id == org.id)
+        )).scalar_one_or_none()
+        if team_obj is None:
+            raise HTTPException(status_code=404, detail="Equipo no encontrado")
+        # Permission: caller must be admin OR a leader of this team
+        is_admin = org_role == "admin"
+        is_leader = False
+        if caller is not None:
+            is_leader = (await db.execute(
+                select(_TL).where(_TL.team_id == tid, _TL.member_id == caller.id)
+            )).scalar_one_or_none() is not None
+        if not (is_admin or is_leader):
+            raise HTTPException(status_code=403, detail="Solo los líderes del equipo (o administradores) pueden enviar correos al equipo")
+        # Sender's role label within the team
+        if is_leader:
+            sender_team_role = "Líder de equipo"
+        elif is_admin:
+            sender_team_role = "Administrador"
+        # Team-wide position names
+        team_positions_names = [
+            n for n in (await db.execute(
+                select(_TP.name).where(_TP.team_id == tid).order_by(_TP.sort_order, _TP.name)
+            )).scalars().all()
+        ]
+        # Team leaders payload
+        ldr_rows = (await db.execute(
+            select(_TL, OrgMember).join(OrgMember, OrgMember.id == _TL.member_id)
+            .where(_TL.team_id == tid).order_by(OrgMember.full_name)
+        )).all()
+        team_leaders_payload = [
+            {"full_name": om.full_name, "email": om.email} for _l, om in ldr_rows
+        ]
+
     recipients = (await db.execute(
         select(OrgMember).where(OrgMember.id.in_(rids), OrgMember.org_id == org.id)
     )).scalars().all()
@@ -487,12 +601,32 @@ async def send_message(
         rsm = (await db.execute(
             select(ServiceMember).where(ServiceMember.member_id == rec.id)
         )).scalar_one_or_none()
+        # Per-recipient positions WITHIN the team (if a team context was provided)
+        team_payload = None
+        if team_obj is not None:
+            rec_positions = [
+                n for n in (await db.execute(
+                    select(_TP.name)
+                    .join(_TPM, _TPM.position_id == _TP.id)
+                    .where(_TP.team_id == team_obj.id, _TPM.member_id == rec.id)
+                    .order_by(_TP.sort_order, _TP.name)
+                )).scalars().all()
+            ]
+            team_payload = {
+                "name": team_obj.name,
+                "color": team_obj.color or "",
+                "positions": team_positions_names,
+                "leaders": team_leaders_payload,
+                "recipient_positions": rec_positions,
+            }
         ctx = build_context(
             sender_member=caller, sender_signature=sender_sig, sender_signature_image=sender_sig_img,
             recipient_member=rec,
             recipient_service_role=(rsm.service_role if rsm else None),
             recipient_has_password=bool(rec.hashed_password),
             organization=org,
+            team=team_payload,
+            sender_team_role=sender_team_role,
         )
         # Issue a fresh magic-link token if the template needs one.
         # Rotates any previous token for this member — they ALWAYS get a fresh
@@ -586,6 +720,7 @@ async def autoseed_default_templates(org_id: uuid.UUID, db: AsyncSession) -> Non
     seeds = [
         ("welcome",        "Bienvenida (por defecto)",          DEFAULT_WELCOME_SUBJECT, DEFAULT_WELCOME_BODY),
         ("password_reset", "Restablecer contraseña (por defecto)", DEFAULT_RESET_SUBJECT,   DEFAULT_RESET_BODY),
+        ("team_welcome",   "Bienvenida a equipo (por defecto)",  DEFAULT_TEAM_WELCOME_SUBJECT, DEFAULT_TEAM_WELCOME_BODY),
     ]
     for kind, name, subj, body in seeds:
         existing = (await db.execute(
@@ -694,10 +829,28 @@ async def send_welcome_email(*, org, recipient_member, sender_member, db, backgr
     )
 
 
+async def _resolve_reset_ttl_minutes(db: AsyncSession) -> int:
+    """Read security.password_reset_ttl_minutes from system_settings.
+    Falls back to the in-code default if missing or invalid.
+    Clamped to [1, 1440] (1 min .. 24 h) to avoid catastrophic mis-configs."""
+    from app.models.models import SystemSetting  # local import to avoid cycle
+    row = (await db.execute(
+        select(SystemSetting).where(SystemSetting.key == "security.password_reset_ttl_minutes")
+    )).scalar_one_or_none()
+    try:
+        v = int((row.value if row and row.value else "").strip())
+    except Exception:
+        return RESET_TOKEN_TTL_MINUTES
+    if v < 1: return 1
+    if v > 1440: return 1440
+    return v
+
+
 async def send_password_reset_email(*, org, recipient_member, sender_member, db, background):
+    ttl_min = await _resolve_reset_ttl_minutes(db)
     return await _send_magic_link_email(
         kind="password_reset",
-        ttl=timedelta(minutes=RESET_TOKEN_TTL_MINUTES),
+        ttl=timedelta(minutes=ttl_min),
         org=org, recipient_member=recipient_member, sender_member=sender_member,
         db=db, background=background,
     )

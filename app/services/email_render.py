@@ -115,6 +115,8 @@ def build_context(
     recipient_has_password: bool = False,
     organization,               # Organization model
     service: dict | None = None,  # {day, name, scheduled_at} or None
+    team: dict | None = None,     # {name, color, positions:[str], leaders:[{full_name,email}], recipient_positions:[str]} or None
+    sender_team_role: str | None = None,  # "Líder de equipo" / "Administrador" / role label
 ) -> dict:
     """Build the variable context for a SINGLE recipient. When sending to many
     people, call this per-recipient and render once each.
@@ -171,6 +173,31 @@ def build_context(
         )
     rendered_signature = "".join(sig_html_parts)
 
+    # Team context (optional) — emitted as HTML strings ready to drop in templates
+    team_dict: dict = {"name": "", "color": "", "positions": "", "leaders": "", "recipient_positions": ""}
+    if team:
+        positions = team.get("positions") or []
+        leaders = team.get("leaders") or []
+        rp = team.get("recipient_positions") or []
+        team_dict = {
+            "name": team.get("name") or "",
+            "color": team.get("color") or "",
+            "positions": (
+                "<ul>" + "".join(f"<li>{p}</li>" for p in positions) + "</ul>"
+            ) if positions else "<p><em>—</em></p>",
+            "leaders": (
+                "<ul>" + "".join(
+                    f"<li>{(l.get('full_name') or l.get('email') or '').strip()}"
+                    + (f" · <a href=\"mailto:{l['email']}\">{l['email']}</a>" if l.get('email') else "")
+                    + "</li>"
+                    for l in leaders
+                ) + "</ul>"
+            ) if leaders else "<p><em>—</em></p>",
+            "recipient_positions": (
+                "<ul>" + "".join(f"<li>{p}</li>" for p in rp) + "</ul>"
+            ) if rp else "<p><em>—</em></p>",
+        }
+
     return {
         "to": to_dict,
         "from": {
@@ -180,7 +207,9 @@ def build_context(
             "email": (sender_member.email if sender_member else (organization.email or "")) or "",
             "signature": rendered_signature,
             "signature_image": sender_signature_image or "",
+            "team_role": sender_team_role or "",
         },
         "organization": org_dict,
         "service": service or {},
+        "team": team_dict,
     }
