@@ -1416,14 +1416,14 @@ The frontend redirects (`replace`) to the first accessible module when the URL t
 
 ## Tenant · Teams
 
-A Team groups org_members for service assignments (Adoración, Audio/Visual, Recibo, Desayunos, etc.). Linked to ServiceType via `service_teams` M2M. Same auth/role rules as Services.
+A Team groups org_members for service assignments (Adoración, Audio/Visual, Recibo, Desayunos, etc.). Linked to ServiceType via `service_teams` M2M, leaders via `team_leaders` M2M. Same auth/role rules as Services.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| GET    | `/tenant/{slug}/teams` | JWT or cookie | List teams + `member_count` |
-| POST   | `/tenant/{slug}/teams` | admin/leader | Create team |
-| PATCH  | `/tenant/{slug}/teams/{team_id}` | admin/leader | Update team (name, color, description) |
-| DELETE | `/tenant/{slug}/teams/{team_id}` | admin/leader | Cascade-deletes memberships + service_teams links |
+| GET    | `/tenant/{slug}/teams` | JWT or cookie | List teams + `member_count` + flags + `leader_member_ids[]` + `service_type_ids[]` |
+| POST   | `/tenant/{slug}/teams` | admin/leader | Create team (auto-adds caller as leader if `leader_member_ids` omitted/empty) |
+| PATCH  | `/tenant/{slug}/teams/{team_id}` | admin/leader | Update name/color/description/flags + settings (default_status, notify_on_prepare, replies_to, gap_alerts_enabled, last_scheduled_date_rule, scheduled_viewer_access, signup_sheets_auto_enable, reschedule_on_decline); **replaces** `leader_member_ids[]`, `service_type_ids[]`, `related_team_ids[]` when provided |
+| DELETE | `/tenant/{slug}/teams/{team_id}` | admin/leader | Cascade-deletes memberships, leaders, service_teams links |
 | GET    | `/tenant/{slug}/teams/{team_id}/members` | JWT or cookie | List memberships (joins `org_members` for name/email) |
 | POST   | `/tenant/{slug}/teams/{team_id}/members` | admin/leader | Add a member to the team — body: `{ member_id, role? }` |
 | DELETE | `/tenant/{slug}/teams/{team_id}/members/{member_id}` | admin/leader | Remove member from team |
@@ -1434,9 +1434,49 @@ A Team groups org_members for service assignments (Adoración, Audio/Visual, Rec
 {
   "name": "Equipo de Adoración",
   "color": "#4F46E5",
-  "description": "Cantantes, instrumentistas, dirección musical"
+  "description": "Cantantes, instrumentistas, dirección musical",
+  "is_rehearsal": true,
+  "is_secure": false,
+  "is_split": false,
+  "leader_member_ids": ["uuid-of-leader-1", "uuid-of-leader-2"],
+  "service_type_ids": ["uuid-of-service-type"]
 }
 ```
+
+`leader_member_ids` and `service_type_ids` are optional. If `leader_member_ids` is missing or empty, the **caller is auto-added** as the first leader (matches PCO UX). Unknown IDs are silently dropped (same-org guard).
+
+### Flags
+
+| Flag | Meaning |
+|------|---------|
+| `is_rehearsal` | Equipo de ensayo. Acceso a canciones, partituras y media del servicio asignado. |
+| `is_secure` | Equipo seguro. Sólo personas con verificación de antecedentes pueden ser asignadas. (Por ahora sólo se guarda el flag; la verificación real con un check-provider llega en Fase 3.) |
+| `is_split` | Equipo dividido. Permite distintas personas por franja cuando hay varios servicios el mismo día. |
+
+### Settings fields (PATCH)
+
+Persistidos en BD hoy; comportamiento real llega con módulo Servicios completo
+(ver `artifacts/SERVICES-INTEGRATION-NOTES.md`).
+
+| Field | Type | Values | Phase |
+|-------|------|--------|-------|
+| `default_status` | str | `unconfirmed` · `confirmed` | Fase 3 |
+| `notify_on_prepare` | bool | true / false | Fase 3 |
+| `replies_to` | str | `all_leaders` · `service_type_leaders` · `no_one` | Fase 3 |
+| `gap_alerts_enabled` | bool | true / false | Fase 3 |
+| `last_scheduled_date_rule` | str | `same_as_service_type` · `last_used_anywhere` · `last_used_in_team` · `last_used_in_position` | Fase 3 |
+| `scheduled_viewer_access` | str | `full_plan` · `limited` · `none` | Fase 3 |
+| `signup_sheets_auto_enable` | bool | true / false | Fase 3 |
+| `reschedule_on_decline` | str | `none` · `manual` · `volunteer` · `auto` · `signup_sheet` | Fase 3 |
+| `related_team_ids[]` | str[] | UUIDs de equipos del mismo org (replace-all, no-self) | Hoy (UI activa) |
+
+PATCH dropea silently: ids no-UUID, ids de otro org, y `team_id` propio en
+`related_team_ids`. UNIQUE pair en `team_related` evita duplicados.
+
+**`service_type_ids` mínimo 1.** Si el body envía `service_type_ids` y tras
+filtrar UUIDs válidos del mismo org queda 0, devuelve `400 — "Selecciona al
+menos un tipo de servicio."` Frontend bloquea el botón Guardar y deshabilita el
+× del último chip restante.
 
 ### Response
 
@@ -1446,7 +1486,24 @@ A Team groups org_members for service assignments (Adoración, Audio/Visual, Rec
   "name": "Equipo de Adoración",
   "color": "#4F46E5",
   "description": "...",
-  "member_count": 0
+  "member_count": 0,
+  "is_rehearsal": true,
+  "is_secure": false,
+  "is_split": false,
+  "default_status": "unconfirmed",          // unconfirmed | confirmed
+  "notify_on_prepare": true,
+  "replies_to": "all_leaders",              // all_leaders | service_type_leaders | no_one
+  "gap_alerts_enabled": false,
+  "last_scheduled_date_rule": "same_as_service_type", // same_as_service_type | last_used_anywhere | last_used_in_team | last_used_in_position
+  "scheduled_viewer_access": "full_plan",   // full_plan | limited | none
+  "signup_sheets_auto_enable": false,
+  "reschedule_on_decline": "manual",        // none | manual | volunteer | auto | signup_sheet
+  "leaders": [
+    { "member_id": "uuid", "full_name": "Jibsan Rosa", "email": "jibsan@ccc.com" }
+  ],
+  "leader_member_ids": ["uuid"],
+  "service_type_ids": ["uuid"],
+  "related_team_ids": ["uuid", "uuid"]
 }
 ```
 
@@ -1459,6 +1516,54 @@ A Team groups org_members for service assignments (Adoración, Audio/Visual, Rec
 | 403  | Solo administradores y líderes |
 | 404  | Equipo no encontrado · Miembro no encontrado · Pertenencia no encontrada |
 | 409  | Ya está en el equipo |
+
+### Team detail + Positions (PCO-style)
+
+Used by the team detail view in the tenant portal. Positions are named roles inside a team (Piano, Bajo, Guitarra Acústica…). Members are assigned to a position via `team_position_members`. The "all team members" view is the DISTINCT union across all position assignments.
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET    | `/tenant/{slug}/teams/{team_id}/detail` | JWT or cookie | Full detail payload: `{ team, leaders, positions, all_members }`. Each person includes `preferences` (max_per_month/day from `service_members` if present, else null). |
+| POST   | `/tenant/{slug}/teams/{team_id}/positions` | admin/leader | Create a position. Body: `{ name }`. 409 on duplicate name within the same team. |
+| PATCH  | `/tenant/{slug}/teams/{team_id}/positions/{pos_id}` | admin/leader | Rename or reorder. Body: `{ name?, sort_order? }`. |
+| DELETE | `/tenant/{slug}/teams/{team_id}/positions/{pos_id}` | admin/leader | Cascade-deletes all `team_position_members` for the position. |
+| POST   | `/tenant/{slug}/teams/{team_id}/positions/{pos_id}/members` | admin/leader | Bulk-add. Body: `{ member_ids: [...] }`. Idempotent — already-present pairs go to `skipped`, unknown ids are dropped. **Auto-enrolls** any member_id without a `service_members` row (default viewer permissions; org admins skipped). Returns `{ added, skipped, newly_enrolled }`. |
+| DELETE | `/tenant/{slug}/teams/{team_id}/positions/{pos_id}/members/{member_id}` | admin/leader | Remove a single person from a position. |
+
+#### GET /tenant/{slug}/teams/{team_id}/detail — Response
+
+```json
+{
+  "team": { "id": "...", "name": "Equipo de Adoración", "is_rehearsal": true, ... },
+  "leaders": [
+    { "member_id": "...", "full_name": "Jibsan Rosa", "email": "jibsan@ccc.com",
+      "avatar": null, "preferences": { "max_per_month": null, "max_per_day": null } }
+  ],
+  "positions": [
+    {
+      "id": "...", "name": "Piano", "sort_order": 1, "member_count": 2,
+      "members": [ { "member_id": "...", "full_name": "...", "email": "...", "avatar": null, "preferences": { ... } } ]
+    }
+  ],
+  "all_members": [ /* DISTINCT union of all position members */ ]
+}
+```
+
+#### POST /tenant/{slug}/teams/{team_id}/positions/{pos_id}/members — Request / Response
+
+```json
+// Request
+{ "member_ids": ["uuid-1", "uuid-2", "uuid-3"] }
+
+// Response
+{
+  "added":   ["uuid-1", "uuid-2"],
+  "skipped": ["uuid-3"],          // uuid-3 was already in this position; unknown ids silently dropped
+  "newly_enrolled": [              // members auto-enrolled into Services (no service_members row before)
+    { "member_id": "uuid-2", "service_member_id": "sm-uuid", "full_name": "...", "email": "..." }
+  ]
+}
+```
 
 ---
 

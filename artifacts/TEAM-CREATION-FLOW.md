@@ -1,6 +1,6 @@
 # Equipos · Flujo de creación (PCO-style)
 
-**Estado:** 🚧 En implementación · iniciado 2026-05-27
+**Estado:** ✅ Completado · 2026-05-25
 
 Este documento describe el nuevo modal de creación / edición de equipos
 inspirado en el "Add Team" de Planning Center, junto con el resto del trabajo

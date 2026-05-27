@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime, time, timezone
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, String, Text, Time, func
+from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Integer, String, Text, Time, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -294,8 +294,35 @@ class Team(Base):
     is_rehearsal: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_secure: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_split: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Scheduling defaults
+    default_status: Mapped[str] = mapped_column(String(50), default="unconfirmed", nullable=False)
+    notify_on_prepare: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    replies_to: Mapped[str] = mapped_column(String(50), default="all_leaders", nullable=False)
+    # Gap alerts
+    gap_alerts_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Options
+    last_scheduled_date_rule: Mapped[str] = mapped_column(String(50), default="same_as_service_type", nullable=False)
+    scheduled_viewer_access: Mapped[str] = mapped_column(String(50), default="full_plan", nullable=False)
+    signup_sheets_auto_enable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Rescheduling declines
+    reschedule_on_decline: Mapped[str] = mapped_column(String(50), default="manual", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class TeamRelated(Base):
+    """Related teams (m:n team↔team within same org).
+
+    Used by the "My Teams" filter and cross-team views. Symmetry is logical
+    only (UI mirrors both sides) — storage is one row per ordered pair.
+    """
+    __tablename__ = "team_related"
+    __table_args__ = (UniqueConstraint("team_id", "related_team_id", name="uq_team_related_pair"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False, index=True)
+    related_team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
 
 
 class TeamLeader(Base):
@@ -318,6 +345,34 @@ class TeamMembership(Base):
     team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False, index=True)
     member_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("org_members.id", ondelete="CASCADE"), nullable=False, index=True)
     role: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
+
+
+class TeamPosition(Base):
+    """A named role inside a team (Piano, Bajo, Guitarra Acústica…).
+
+    Lives under a Team. Members are assigned to a position via
+    `team_position_members`. The union of all position members is the team's
+    "All members" view; `team_leaders` is a separate axis.
+    """
+    __tablename__ = "team_positions"
+    __table_args__ = (UniqueConstraint("team_id", "name", name="uq_team_position_name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(150), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
+
+
+class TeamPositionMember(Base):
+    """Assignment of an org_member to a team position. M2M."""
+    __tablename__ = "team_position_members"
+    __table_args__ = (UniqueConstraint("position_id", "member_id", name="uq_team_position_member"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    position_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("team_positions.id", ondelete="CASCADE"), nullable=False, index=True)
+    member_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("org_members.id", ondelete="CASCADE"), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, server_default=func.now())
 
 

@@ -203,9 +203,38 @@ songs                — biblioteca de canciones
 media_assets         — multimedia (imagen/vídeo/audio/doc)
   id, org_id, name, kind, url, size_bytes, mime, uploaded_at
 teams                — equipos de voluntarios (Adoración, Audio/Visual, Recibo…)
-  id, org_id (FK CASCADE), name, color, description, created_at, updated_at
+  id, org_id (FK CASCADE), name, color, description,
+  is_rehearsal BOOL DEFAULT FALSE,  -- acceso a canciones/partituras/media
+  is_secure BOOL DEFAULT FALSE,      -- sólo background-checked (flag por ahora)
+  is_split BOOL DEFAULT FALSE,       -- distintas personas por franja del mismo día
+  -- Scheduling defaults
+  default_status VARCHAR(50) DEFAULT 'unconfirmed',
+  notify_on_prepare BOOL DEFAULT TRUE,
+  replies_to VARCHAR(50) DEFAULT 'all_leaders',
+  -- Gap alerts
+  gap_alerts_enabled BOOL DEFAULT FALSE,
+  -- Options
+  last_scheduled_date_rule VARCHAR(50) DEFAULT 'same_as_service_type',
+  scheduled_viewer_access VARCHAR(50) DEFAULT 'full_plan',
+  signup_sheets_auto_enable BOOL DEFAULT FALSE,
+  -- Rescheduling declines
+  reschedule_on_decline VARCHAR(50) DEFAULT 'manual',
+  created_at, updated_at
+team_leaders         — líderes del equipo (m:n team↔org_member)
+  id, team_id (FK CASCADE), member_id (FK→org_members CASCADE), created_at
+  UNIQUE(team_id, member_id)
 team_memberships     — pertenencia equipo↔org_member (m:n)
   id, team_id (FK CASCADE), member_id (FK→org_members CASCADE), role
+team_positions       — posiciones por equipo (Piano, Bajo, …)
+  id, team_id (FK CASCADE), name VARCHAR(150), sort_order, created_at
+  UNIQUE(team_id, name)
+team_position_members — asignación persona ↔ posición (m:n)
+  id, position_id (FK→team_positions CASCADE), member_id (FK→org_members CASCADE), created_at
+  UNIQUE(position_id, member_id)
+team_related          — equipos relacionados (m:n team↔team, mismo org)
+  id, team_id (FK→teams CASCADE), related_team_id (FK→teams CASCADE), created_at
+  UNIQUE(team_id, related_team_id), CHECK(team_id <> related_team_id)
+  Usado por el filtro "Mis equipos" en pestaña Miembros (Fase 3).
 scores               — partituras (por instrumento)
   id, org_id, song_id, title, score_key, instrument, file_url
 events               — eventos puntuales (campamentos, retiros)
