@@ -1016,13 +1016,17 @@ All endpoints require a valid `tenant_access` cookie or `Authorization: Bearer <
 | POST   | `/tenant/{slug}/services/types` | admin/leader | Create service type + nested times + team picks |
 | PATCH  | `/tenant/{slug}/services/types/{type_id}` | admin/leader | Update fields and/or replace nested `times` / `team_ids` |
 | DELETE | `/tenant/{slug}/services/types/{type_id}` | admin/leader | Cascade-deletes service_times + service_teams (FK ON DELETE CASCADE) |
-| GET    | `/tenant/{slug}/services/plans` | JWT or cookie | List concrete plan instances (ordered by scheduled_at DESC, NULLS LAST) |
-| POST   | `/tenant/{slug}/services/plans` | admin/leader | Create a one-off plan instance |
-| GET    | `/tenant/{slug}/services/occurrences?range_from=YYYY-MM-DD&range_to=YYYY-MM-DD` | JWT or cookie | Project ServiceTime templates forward into concrete date+time occurrences. Default window: today → today+90d |
+| GET    | `/tenant/{slug}/services/plans?service_type_id=<id>` | JWT or cookie | List concrete `ServicePlan` rows. Optional `service_type_id` filter. Ordered by `scheduled_at ASC NULLS LAST`. Response includes `updated_at`/`created_at`. |
+| POST   | `/tenant/{slug}/services/plans` | admin/leader | Create a plan. Body: `{ service_type_id?, title?, scheduled_at?, status?, notes? }`. **Auto-defaults:** if `scheduled_at` missing and `service_type_id` is set, the backend picks the next occurrence matching the first `service_time` (weekday + start_time). If `title` missing → `"{type.name} · {dd MMM yyyy}"`. |
+| DELETE | `/tenant/{slug}/services/plans/{plan_id}` | admin/leader | Hard-delete a plan. |
+| GET    | `/tenant/{slug}/services/occurrences?range_from=YYYY-MM-DD&range_to=YYYY-MM-DD` | JWT or cookie | **Now returns only REAL `ServicePlan` rows** within the window — auto-projection from recurrence/service_times was removed. Default window: today → today+90d. |
+| GET    | `/tenant/{slug}/services/types/{type_id}/next-default` | JWT or cookie | Returns `{ scheduled_at: ISO8601, service_type_id, service_type_name }` — the date+time to pre-fill the Add-plan modal. Falls back to next Sunday 11:00 if the type has no times configured. |
 
 ### Recurrence values
 
-`none` (one-shot, no projection) · `random` (single anchor, no projection) · `daily` · `weekly` · `weekdays` (Mon–Fri) · `biweekly` · `monthly` (same day-of-month, clamped to last day if shorter)
+`none` · `random` · `daily` · `weekly` · `weekdays` (Mon–Fri) · `biweekly` · `monthly`.
+
+**Behaviour change (2026-05-28):** recurrence + `service_times` are now used **only as a template / default** for the Add-plan modal. The backend no longer expands them into virtual occurrences. The Servicios tab shows only real `ServicePlan` rows. The legacy `_project()` projection helper still exists in code but is unused.
 
 ### POST /tenant/{slug}/services/types — Request body
 

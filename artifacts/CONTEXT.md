@@ -145,6 +145,7 @@ Cuando `must_change_password: true`:
 
 ## Funcionalidades implementadas
 
+- [x] **Servicios · sin auto-generación** — el `recurrence` + `service_times` de un `ServiceType` ya NO generan ocurrencias virtuales. Sirven como **plantilla por defecto** para el modal de crear plan. `GET /services/occurrences` ahora devuelve sólo `ServicePlan` reales (mismo schema). Nuevo `GET /services/types/{id}/next-default` que devuelve `{scheduled_at}` calculando próxima fecha que case el weekday + start_time del primer `service_time`. `POST /services/plans` acepta sólo `service_type_id` y auto-rellena `scheduled_at` + `title` (`<type.name> · <dd MMM yyyy>`). Nuevo `DELETE /services/plans/{id}`. Listado `GET /services/plans?service_type_id=<id>` con filtro. Frontend `ServiceTypeCard` rediseñada estilo PCO: card colapsable con filtro "Próximos/Anteriores/Todos", tabla 3-col (fecha+título+actualización), botón "+ Añadir plan" inline, dropdown ⚙ con eliminar tipo. `AddPlanModal` pre-rellena fecha+hora via `/next-default`. Wipe de `service_plans` ejecutado en BD para empezar de cero.
 - [x] Login page con redirección automática si no autenticado
 - [x] ProtectedRoute (guard por autenticación)
 - [x] RoleRoute (guard por rol — redirige a `/` si no autorizado)

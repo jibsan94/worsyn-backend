@@ -273,19 +273,29 @@ async def delete_type(
 @router.get("/plans")
 async def list_plans(
     slug: str,
+    service_type_id: str | None = None,
     authorization: str | None = Header(default=None),
     tenant_access: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ):
     org, _ = await _auth(slug, authorization, tenant_access, db)
-    rows = (await db.execute(
-        select(ServicePlan).where(ServicePlan.org_id == org.id).order_by(ServicePlan.scheduled_at.desc().nullslast())
-    )).scalars().all()
+    q = select(ServicePlan).where(ServicePlan.org_id == org.id)
+    if service_type_id:
+        try:
+            tid = uuid.UUID(service_type_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="service_type_id inválido")
+        q = q.where(ServicePlan.service_type_id == tid)
+    rows = (await db.execute(q.order_by(ServicePlan.scheduled_at.asc().nullslast()))).scalars().all()
+    # Pull last-editor name in bulk (optional — we use updated_at + a synthetic
+    # editor label fall-back. Real audit trail Phase 3.)
     return [
         {
             "id": str(r.id), "title": r.title, "status": r.status,
             "scheduled_at": r.scheduled_at.isoformat() if r.scheduled_at else None,
             "service_type_id": str(r.service_type_id) if r.service_type_id else None,
+            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
         } for r in rows
     ]
 
@@ -299,9 +309,6 @@ async def create_plan(
 ):
     org, role = await _auth(slug, authorization, tenant_access, db)
     _require_priv(role)
-    title = (body.get("title") or "").strip()
-    if not title:
-        raise HTTPException(status_code=400, detail="Título requerido")
     sched = None
     if body.get("scheduled_at"):
         try:
@@ -309,11 +316,39 @@ async def create_plan(
         except Exception:
             raise HTTPException(status_code=400, detail="scheduled_at inválido (ISO 8601)")
     type_id = None
+    type_obj: ServiceType | None = None
     if body.get("service_type_id"):
         try:
             type_id = uuid.UUID(body["service_type_id"])
         except Exception:
             raise HTTPException(status_code=400, detail="service_type_id inválido")
+        type_obj = (await db.execute(
+            select(ServiceType).where(ServiceType.id == type_id, ServiceType.org_id == org.id)
+        )).scalar_one_or_none()
+        if type_obj is None:
+            raise HTTPException(status_code=404, detail="Tipo de servicio no encontrado")
+
+    # Auto-default scheduled_at from the service_type's first service_time
+    # if not explicitly provided. Lets the UI submit just `service_type_id`
+    # and have the backend pick the next occurrence of the configured weekday.
+    if sched is None and type_obj is not None:
+        times = (await db.execute(
+            select(ServiceTime).where(ServiceTime.service_type_id == type_obj.id)
+            .order_by(ServiceTime.sort_order, ServiceTime.start_time)
+        )).scalars().all()
+        pick = _next_default_for_type(type_obj.id, times, date.today())
+        if pick is not None:
+            sched = datetime.combine(pick[0], pick[1])
+
+    # Title is auto-derived from the type name + date if missing
+    title = (body.get("title") or "").strip()
+    if not title:
+        if type_obj is not None and sched is not None:
+            title = f"{type_obj.name} · {sched.strftime('%d %b %Y')}"
+        elif sched is not None:
+            title = sched.strftime("Plan · %d %b %Y")
+        else:
+            raise HTTPException(status_code=400, detail="Título requerido (o indica service_type_id + scheduled_at)")
 
     sp = ServicePlan(
         org_id=org.id, service_type_id=type_id, title=title,
@@ -326,7 +361,29 @@ async def create_plan(
         "id": str(sp.id), "title": sp.title, "status": sp.status,
         "scheduled_at": sp.scheduled_at.isoformat() if sp.scheduled_at else None,
         "service_type_id": str(sp.service_type_id) if sp.service_type_id else None,
+        "updated_at": sp.updated_at.isoformat() if sp.updated_at else None,
     }
+
+
+@router.delete("/plans/{plan_id}", status_code=204)
+async def delete_plan(
+    slug: str, plan_id: str,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    org, role = await _auth(slug, authorization, tenant_access, db)
+    _require_priv(role)
+    try:
+        pid = uuid.UUID(plan_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="plan_id inválido")
+    sp = (await db.execute(
+        select(ServicePlan).where(ServicePlan.id == pid, ServicePlan.org_id == org.id)
+    )).scalar_one_or_none()
+    if sp is None:
+        raise HTTPException(status_code=404, detail="Plan no encontrado")
+    await db.delete(sp)
 
 
 # ── Occurrence projection (used by calendar) ──────────────────────────────────
@@ -381,37 +438,102 @@ async def list_occurrences(
     tenant_access: str | None = Cookie(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Project service_times forward into concrete occurrences. Default window: 90 days from today."""
+    """Return ONLY real ServicePlan rows in the window — NO auto-projection.
+
+    A ServiceType's `recurrence` + `service_times` are now treated as a default
+    template (day-of-week + time) used to pre-fill the Add-plan modal. They are
+    no longer expanded into virtual occurrences on the calendar.
+    """
     org, _ = await _auth(slug, authorization, tenant_access, db)
     today = date.today()
     rf = _parse_date(range_from) if range_from else today
     rt = _parse_date(range_to) if range_to else today + timedelta(days=90)
-    types = (await db.execute(
-        select(ServiceType).where(ServiceType.org_id == org.id)
-    )).scalars().all()
+
+    rows = (await db.execute(
+        select(ServicePlan, ServiceType)
+        .outerjoin(ServiceType, ServiceType.id == ServicePlan.service_type_id)
+        .where(ServicePlan.org_id == org.id, ServicePlan.scheduled_at.is_not(None))
+    )).all()
     out: list[dict] = []
-    for t in types:
-        times = (await db.execute(
-            select(ServiceTime).where(ServiceTime.service_type_id == t.id)
-        )).scalars().all()
-        for st in times:
-            anchor = st.starts_on if st.starts_on >= rf else st.starts_on
-            # If the anchor is in the past, advance forward via recurrence
-            if t.recurrence in ("weekly", "biweekly", "daily", "weekdays", "monthly") and anchor < rf:
-                # generate from anchor → align cursor into window
-                projected = _project(t.recurrence, anchor, rt)
-                projected = [d for d in projected if d >= rf]
-                dates = projected
-            else:
-                dates = _project(t.recurrence, max(anchor, rf), rt)
-            for d in dates:
-                out.append({
-                    "service_type_id": str(t.id),
-                    "service_type_name": t.name,
-                    "color": t.color,
-                    "date": d.isoformat(),
-                    "start_time": st.start_time.strftime("%H:%M"),
-                    "end_time": st.end_time.strftime("%H:%M"),
-                })
+    for sp, st in rows:
+        if sp.scheduled_at is None:
+            continue
+        d = sp.scheduled_at.date()
+        if d < rf or d > rt:
+            continue
+        out.append({
+            "plan_id": str(sp.id),
+            "service_type_id": str(st.id) if st else None,
+            "service_type_name": st.name if st else None,
+            "color": st.color if st else None,
+            "date": d.isoformat(),
+            "start_time": sp.scheduled_at.strftime("%H:%M"),
+            "end_time": "",
+            "title": sp.title,
+            "status": sp.status,
+        })
     out.sort(key=lambda x: (x["date"], x["start_time"]))
     return out
+
+
+# ── Default-plan helper ─────────────────────────────────────────────────────
+def _next_default_for_type(type_id: uuid.UUID, times: list[ServiceTime], today: date) -> tuple[date, time] | None:
+    """Pick the next future date matching one of the service_times rows.
+
+    Strategy:
+      - If service_time has `starts_on >= today` → use that date + start_time.
+      - Otherwise advance from today to the next occurrence of `starts_on.weekday()`
+        and pair with start_time.
+      - If multiple times, pick the earliest resulting (date, time) tuple.
+    """
+    if not times:
+        return None
+    candidates: list[tuple[date, time]] = []
+    for st in times:
+        if st.starts_on >= today:
+            candidates.append((st.starts_on, st.start_time))
+            continue
+        # Advance to next same-weekday in the future
+        target_dow = st.starts_on.weekday()
+        delta = (target_dow - today.weekday()) % 7
+        if delta == 0 and st.start_time <= datetime.now().time():
+            delta = 7
+        nd = today + timedelta(days=delta)
+        candidates.append((nd, st.start_time))
+    candidates.sort()
+    return candidates[0]
+
+
+@router.get("/types/{type_id}/next-default")
+async def get_next_default(
+    slug: str, type_id: str,
+    authorization: str | None = Header(default=None),
+    tenant_access: str | None = Cookie(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns `{ scheduled_at: ISO8601 }` — the date+time to pre-fill the
+    Add-plan modal with, derived from the service_type's first service_time.
+    Falls back to next Sunday 11:00 if the type has no times configured."""
+    org, _ = await _auth(slug, authorization, tenant_access, db)
+    try:
+        tid = uuid.UUID(type_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="type_id inválido")
+    t = (await db.execute(
+        select(ServiceType).where(ServiceType.id == tid, ServiceType.org_id == org.id)
+    )).scalar_one_or_none()
+    if t is None:
+        raise HTTPException(status_code=404, detail="Tipo no encontrado")
+    times = (await db.execute(
+        select(ServiceTime).where(ServiceTime.service_type_id == t.id).order_by(ServiceTime.sort_order, ServiceTime.start_time)
+    )).scalars().all()
+    today = date.today()
+    pick = _next_default_for_type(t.id, times, today)
+    if pick is None:
+        # Fallback: next Sunday at 11:00
+        delta = (6 - today.weekday()) % 7 or 7
+        nd, tm = today + timedelta(days=delta), time(11, 0)
+    else:
+        nd, tm = pick
+    dt = datetime.combine(nd, tm)
+    return {"scheduled_at": dt.isoformat(), "service_type_id": str(t.id), "service_type_name": t.name}
